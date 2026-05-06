@@ -114,6 +114,8 @@ attach, then live-updates flow through.
 | `TRUNCATED_MESSAGES_DIR`     | `~/.agent-shell/slack-truncated`     | Where full tool outputs cache for 📖 expand. |
 | `TODO_DIRECTORY`             | `~/org/todo`                         | Where bookmark reactions write TODO files. |
 | `WEBSOCKET_STALE_THRESHOLD`  | `7200`                               | Seconds of socket silence before warning is logged. |
+| `BACKFILL_HISTORY`           | `false`                              | If true, replay the proxy's cached history into Slack on attach. Off by default — replays trip Slack rate limits and create noise. |
+| `LIVE_QUIET_MS`              | `2000`                               | Inbound silence (ms) needed before considering an attach "live" when `BACKFILL_HISTORY=false`. |
 | `IMAGE_UPLOAD_RATE_LIMIT`    | `30`                                 | Reserved. |
 | `IMAGE_UPLOAD_RATE_WINDOW`   | `60`                                 | Reserved. |
 | `ACP_SOCKET_DIR`             | `$XDG_RUNTIME_DIR/acp-multiplex`     | Override if your sockets live elsewhere. |

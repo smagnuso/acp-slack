@@ -19,6 +19,14 @@ export interface Config {
   imageUploadRateLimit: number;
   imageUploadRateWindow: number;
   socketDir: string;
+  // When true, mirror the proxy's history replay to Slack on attach.
+  // Default false — replaying long-running sessions floods the channel
+  // and trips Slack's rate limits. Live activity from this point forward
+  // works regardless.
+  backfillHistory: boolean;
+  // Quiet period (ms) of inbound silence before we consider the attach
+  // "caught up to live." Used only when backfillHistory is false.
+  liveQuietMs: number;
   debug: boolean;
 }
 
@@ -137,6 +145,8 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
     imageUploadRateLimit: intVal(map, "IMAGE_UPLOAD_RATE_LIMIT", 30),
     imageUploadRateWindow: intVal(map, "IMAGE_UPLOAD_RATE_WINDOW", 60),
     socketDir: expandHome(map.get("ACP_SOCKET_DIR") ?? defaultSocketDir()),
+    backfillHistory: bool(map, "BACKFILL_HISTORY", false),
+    liveQuietMs: intVal(map, "LIVE_QUIET_MS", 2000),
     debug: bool(map, "DEBUG", false),
   };
 }

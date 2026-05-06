@@ -56,10 +56,18 @@ export interface SessionBridgeOptions {
 // One SessionBridge per acp-multiplex socket. Maintains per-session
 // (sessionId) state — most sockets have a single session but the protocol
 // allows multiple, so the bridge holds a map.
+//
+// Replay handling: when we attach, the proxy replays everything cached
+// for that session. We don't want each replayed event posting to Slack
+// (rate limits, noise). The bridge starts in `replay` mode where every
+// frame resets a quiet timer; once the timer fires (~2s of inbound
+// silence) we flip to `live` and start posting. Replayed events still
+// build internal state so we know about active sessions/tool calls, we
+// just don't surface them.
 export class SessionBridge {
   private sessions = new Map<string, SessionState>();
   // sessionId -> resolver for any in-flight permission request awaiting a
-  // Slack reaction. Phase 4 wires this up.
+  // Slack reaction.
   permissionResolvers = new Map<
     string,
     {
@@ -69,9 +77,39 @@ export class SessionBridge {
     }
   >();
 
+  // When backfillHistory is true, we surface every replayed event. When
+  // false (the default), we discard the proxy's history replay and only
+  // post Slack messages once the inbound stream has been quiet for
+  // `liveQuietMs`. See SessionBridge class doc.
+  private live: boolean;
+  private liveTimer: NodeJS.Timeout | undefined;
+
   constructor(private readonly opts: SessionBridgeOptions) {
-    opts.attach.on("notification", (n) => void this.onNotification(n));
-    opts.attach.on("request", (r) => void this.onRequest(r));
+    this.live = opts.config.backfillHistory;
+    opts.attach.on("notification", (n) => {
+      this.bumpLiveTimer();
+      void this.onNotification(n);
+    });
+    opts.attach.on("request", (r) => {
+      this.bumpLiveTimer();
+      void this.onRequest(r);
+    });
+    if (!this.live) {
+      this.bumpLiveTimer();
+    }
+  }
+
+  private bumpLiveTimer(): void {
+    if (this.live) {
+      return;
+    }
+    if (this.liveTimer) {
+      clearTimeout(this.liveTimer);
+    }
+    this.liveTimer = setTimeout(() => {
+      this.live = true;
+      log.info(`live: ${this.opts.attach.socketPath}`);
+    }, this.opts.config.liveQuietMs);
   }
 
   // Public so the inbound handlers can route by sessionId.
@@ -89,6 +127,9 @@ export class SessionBridge {
   }
 
   private async onNotification(n: JsonRpcNotification): Promise<void> {
+    if (!this.live) {
+      return; // drop replayed history; only act on live events
+    }
     const params = (n.params ?? {}) as Record<string, unknown>;
     const sessionId = (params.sessionId ?? params.session_id) as
       | string
@@ -114,20 +155,26 @@ export class SessionBridge {
     const sessionId = params.sessionId as string | undefined;
     log.debug(`request ${r.method} sessionId=${sessionId ?? "(none)"}`);
 
-    if (r.method === "session/request_permission" && sessionId) {
-      await this.handlePermissionRequest(r, sessionId, params);
-      return;
-    }
-
-    // For fs/* requests we deliberately don't pretend to be the editor —
-    // primary frontend (agent-shell) already serves those. Reply with an
-    // error so the agent falls back if it asks us.
+    // fs/* always answered (whether replayed or live) so the agent doesn't
+    // hang waiting for a response. Primary frontends already handle these.
     if (r.method.startsWith("fs/")) {
       this.opts.attach.replyError(
         r.id,
         -32601,
         "fs/* not supported by acp-slack secondary",
       );
+      return;
+    }
+
+    if (!this.live) {
+      // Replayed permission requests are stale (already resolved by the
+      // primary). Drop without responding — the proxy will route any
+      // live response through the request's original recipient.
+      return;
+    }
+
+    if (r.method === "session/request_permission" && sessionId) {
+      await this.handlePermissionRequest(r, sessionId, params);
       return;
     }
   }
