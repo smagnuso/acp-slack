@@ -1,0 +1,30 @@
+{
+  "name": "acp-slack",
+  "version": "0.1.0",
+  "description": "Bridge acp-multiplex sockets to Slack threads.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "acp-slack": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -p . --watch",
+    "start": "node dist/index.js",
+    "dev": "tsc -p . && node dist/index.js",
+    "test": "node --test --import tsx 'test/**/*.test.ts'",
+    "lint": "tsc -p . --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@slack/bolt": "^4.6.0",
+    "chokidar": "^4.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.6.3"
+  }
+}

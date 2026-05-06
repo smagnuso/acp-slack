@@ -1,0 +1,41 @@
+// Reaction → action mapping. Mirrors agent-shell-to-go--reaction-map.
+
+export type ReactionAction =
+  | "allow"
+  | "deny"
+  | "hide"
+  | "expand_truncated"
+  | "expand_full"
+  | "heart"
+  | "bookmark";
+
+const MAP: Record<string, ReactionAction> = {
+  white_check_mark: "allow",
+  "+1": "allow",
+  unlock: "allow",
+  star: "allow",
+  x: "deny",
+  "-1": "deny",
+
+  see_no_evil: "hide",
+  no_bell: "hide",
+
+  eyes: "expand_truncated",
+
+  book: "expand_full",
+  open_book: "expand_full",
+  books: "expand_full",
+
+  heart: "heart",
+  heart_eyes: "heart",
+  heartpulse: "heart",
+  sparkling_heart: "heart",
+  two_hearts: "heart",
+  revolving_hearts: "heart",
+
+  bookmark: "bookmark",
+};
+
+export function reactionAction(name: string): ReactionAction | undefined {
+  return MAP[name];
+}
