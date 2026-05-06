@@ -66,6 +66,11 @@ export interface SessionBridgeOptions {
 // just don't surface them.
 export class SessionBridge {
   private sessions = new Map<string, SessionState>();
+  // While a session's thread is being opened, concurrent notifications
+  // arriving on the same sessionId all await this single promise so we
+  // never open two threads or post into the channel before the parent ts
+  // is known.
+  private creating = new Map<string, Promise<SessionState | undefined>>();
   // sessionId -> resolver for any in-flight permission request awaiting a
   // Slack reaction.
   permissionResolvers = new Map<
@@ -327,13 +332,18 @@ export class SessionBridge {
       : headerLine;
 
     if (!state.threadMessageTs) {
+      if (!session.threadTs) {
+        log.warn(
+          `tool_call with no threadTs for ${session.sessionId}; dropping`,
+        );
+        return;
+      }
       const r = await this.opts.thread.postMessage({
         channel: session.channel,
         threadTs: session.threadTs,
         text,
       });
       state.threadMessageTs = r.ts;
-      session.threadTs ??= r.threadTs;
       // Save full body for later 📖 expand.
       if (body) {
         this.opts.truncatedStore.save(
@@ -364,10 +374,27 @@ export class SessionBridge {
     sessionId: string,
     params: Record<string, unknown>,
   ): Promise<SessionState | undefined> {
-    let session = this.sessions.get(sessionId);
-    if (session) {
-      return session;
+    const existing = this.sessions.get(sessionId);
+    if (existing) {
+      return existing;
     }
+    const inFlight = this.creating.get(sessionId);
+    if (inFlight) {
+      return inFlight;
+    }
+    const promise = this.createSession(sessionId, params);
+    this.creating.set(sessionId, promise);
+    try {
+      return await promise;
+    } finally {
+      this.creating.delete(sessionId);
+    }
+  }
+
+  private async createSession(
+    sessionId: string,
+    params: Record<string, unknown>,
+  ): Promise<SessionState | undefined> {
     const cwd = this.cwdFromParams(params);
     const channel = this.resolveChannel(cwd);
     if (!channel) {
@@ -377,9 +404,18 @@ export class SessionBridge {
       );
       return undefined;
     }
-    session = {
+    // Open the thread first so threadTs is known before the SessionState
+    // is published into the sessions map. Otherwise concurrent
+    // notifications would race in, see a session-with-no-threadTs, and
+    // post unthreaded.
+    const initial = `:robot_face: *${cwd ? basename(cwd) : sessionId}*\n_session ${sessionId.slice(0, 8)}_`;
+    const r = await this.opts.thread.postMessage({
+      channel,
+      text: initial,
+    });
+    const session: SessionState = {
       sessionId,
-      threadTs: undefined,
+      threadTs: r.threadTs,
       channel,
       toolCalls: new Map(),
       agentChunks: [],
@@ -388,22 +424,14 @@ export class SessionBridge {
       cwd,
     };
     this.sessions.set(sessionId, session);
-    // Open the thread with a header message we can update once we learn
-    // the title.
-    const initial = `:robot_face: *${cwd ? basename(cwd) : sessionId}*\n_session ${sessionId.slice(0, 8)}_`;
-    const r = await this.opts.thread.postMessage({
-      channel: session.channel,
-      text: initial,
-    });
-    session.threadTs = r.threadTs;
     threadRegistry.register({
       bridge: this,
       sessionId,
       channel: session.channel,
-      threadTs: session.threadTs,
+      threadTs: r.threadTs,
     });
     log.info(
-      `opened thread ${session.threadTs} in ${session.channel} for sessionId=${sessionId}`,
+      `opened thread ${r.threadTs} in ${channel} for sessionId=${sessionId}`,
     );
     return session;
   }
@@ -449,6 +477,15 @@ export class SessionBridge {
     if (session.agentChunks.length === 0) {
       return;
     }
+    if (!session.threadTs) {
+      // Should not happen: createSession only publishes a session once
+      // its threadTs is set. Bail noisily if we ever do.
+      log.warn(
+        `flushAgentMessage with no threadTs for ${session.sessionId}; dropping`,
+      );
+      session.agentChunks = [];
+      return;
+    }
     const text = toSlackMrkdwn(session.agentChunks.join(""));
     session.agentChunks = [];
     if (!text.trim()) {
@@ -460,7 +497,6 @@ export class SessionBridge {
       text,
     });
     session.agentMessageTs = r.ts;
-    session.threadTs ??= r.threadTs;
   }
 
   // Convenience: post text right now, flushing any pending agent message
@@ -470,12 +506,17 @@ export class SessionBridge {
     text: string,
   ): Promise<void> {
     await this.flushAgentMessage(session);
-    const r = await this.opts.thread.postMessage({
+    if (!session.threadTs) {
+      log.warn(
+        `postOrAccumulate with no threadTs for ${session.sessionId}; dropping`,
+      );
+      return;
+    }
+    await this.opts.thread.postMessage({
       channel: session.channel,
       threadTs: session.threadTs,
       text,
     });
-    session.threadTs ??= r.threadTs;
   }
 
   // Called by the entry point on a periodic timer to flush idle agent text.
