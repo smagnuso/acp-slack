@@ -169,7 +169,7 @@ export class SessionBridge {
   constructor(private readonly opts: SessionBridgeOptions) {
     this.live = opts.config.backfillHistory;
     opts.attach.on("open", () => {
-      void this.discoverSessions();
+      void this.discoverSessions().then(() => this.eagerAttachThreads());
     });
     opts.attach.on("notification", (n) => {
       this.bumpLiveTimer();
@@ -225,6 +225,93 @@ export class SessionBridge {
     log.info(
       `discovered metadata for ${this.discovered.size} session(s) on ${this.opts.attach.socketPath}`,
     );
+  }
+
+  // After discoverSessions, scan each relevant Slack channel once and
+  // pre-register thread mappings for any session whose marker we find.
+  // This makes inbound Slack messages route correctly *before* the
+  // session emits any agent-side notification — without this, typing
+  // into a thread for a quiet session lands at threadRegistry with no
+  // entry and gets dropped as "no bridge for thread."
+  //
+  // Cost: one conversations.history scan per unique target channel,
+  // capped by findSessionThreadsInChannel's 1000-message safety. The
+  // lazy createSession path still kicks in for any session we miss.
+  private async eagerAttachThreads(): Promise<void> {
+    const channelToSessionIds = new Map<string, string[]>();
+    for (const [sessionId, meta] of this.discovered) {
+      const channel = this.resolveChannel(meta.cwd);
+      if (!channel) {
+        continue;
+      }
+      const list = channelToSessionIds.get(channel) ?? [];
+      list.push(sessionId);
+      channelToSessionIds.set(channel, list);
+    }
+    for (const [channel, sessionIds] of channelToSessionIds) {
+      const matches = await this.opts.thread.findSessionThreadsInChannel(
+        channel,
+      );
+      let attached = 0;
+      for (const sessionId of sessionIds) {
+        const threadTs = matches.get(sessionId);
+        if (!threadTs) {
+          continue;
+        }
+        if (this.materializeFromMarker(sessionId, channel, threadTs)) {
+          attached++;
+        }
+      }
+      log.info(
+        `eager-attached ${attached} thread(s) in ${channel} (scanned ${matches.size} marker(s))`,
+      );
+    }
+  }
+
+  // Build a SessionState from a sessionId + thread we already opened in
+  // a previous daemon lifetime, without posting anything new. Returns
+  // false if a SessionState already exists (e.g. a live notification
+  // raced ahead of eager attach and triggered createSession).
+  private materializeFromMarker(
+    sessionId: string,
+    channel: string,
+    threadTs: string,
+  ): boolean {
+    if (this.sessions.has(sessionId)) {
+      return false;
+    }
+    const known = this.discovered.get(sessionId);
+    const session: SessionState = {
+      sessionId,
+      threadTs,
+      channel,
+      toolCalls: new Map(),
+      agentChunks: [],
+      agentMessageTs: undefined,
+      agentLastSent: undefined,
+      agentFlushChain: undefined,
+      promptChain: undefined,
+      userChunks: [],
+      title: known?.title,
+      cwd: known?.cwd,
+      modeId: undefined,
+      modelId: undefined,
+      contextUsed: undefined,
+      contextSize: undefined,
+      costAmount: undefined,
+      costCurrency: undefined,
+      spinnerTs: undefined,
+      spinnerExpanded: false,
+      turnToolCallIds: [],
+    };
+    this.sessions.set(sessionId, session);
+    threadRegistry.register({
+      bridge: this,
+      sessionId,
+      channel,
+      threadTs,
+    });
+    return true;
   }
 
   private bumpLiveTimer(): void {
