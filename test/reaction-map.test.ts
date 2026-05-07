@@ -19,7 +19,7 @@ test("maps deny reactions", () => {
 });
 
 test("maps cancel reactions", () => {
-  for (const r of ["stop_sign", "octagonal_sign"]) {
+  for (const r of ["stop_sign", "octagonal_sign", "no_entry", "no_entry_sign", "stop"]) {
     assert.equal(reactionAction(r), "cancel");
   }
 });

@@ -128,7 +128,7 @@ attach, then live-updates flow through.
 | `:white_check_mark:` / `:+1:` / `:star:` | Approve once (picks the agent's `allow_once` option) |
 | `:unlock:`                                  | Approve always (picks `allow_always` when offered, otherwise falls back to `allow_once`) |
 | `:x:` / `:-1:`                              | Deny |
-| `:stop_sign:` / `:octagonal_sign:`          | Cancel — react on the active turn spinner to send `session/cancel` to the agent. Ignored on any other message. |
+| `:stop_sign:` / `:octagonal_sign:` / `:no_entry:` / `:no_entry_sign:` / `:stop:` | Cancel — react on the active turn spinner to send `session/cancel` to the agent. Ignored on any other message. |
 | `:see_no_evil:` / `:no_bell:`               | Hide message (toggle to restore) |
 | `:eyes:`                                    | Expand truncated tool output |
 | `:book:` / `:open_book:`                    | Expand full tool output |

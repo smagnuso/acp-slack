@@ -154,6 +154,14 @@ export function createSlackApp(config: Config): SlackApp {
     }
     const action = reactionAction(e.reaction);
     if (!action) {
+      // Only log when the reaction landed on a thread we own — avoids
+      // logging every random reaction on unrelated channel messages.
+      const entry =
+        threadRegistry.lookup(channel, ts) ??
+        (await tryLookupByMessage(app, channel, ts));
+      if (entry) {
+        log.info(`unmapped reaction :${e.reaction}: on ${channel}/${ts}`);
+      }
       return;
     }
     // Reactions can target either the thread parent (root ts) or any
