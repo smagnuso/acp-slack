@@ -761,11 +761,15 @@ export class SessionBridge {
     }
 
     // Flush and close any pending agent message before the spinner so
-    // thread ordering mirrors event order. closeAgentMessage only fires
-    // on the first tool of the turn — subsequent tool updates within the
-    // turn don't disturb the surrounding agent prose.
+    // thread ordering mirrors event order. Each NEW tool call is a
+    // semantic boundary — the agent has stopped narrating and is doing
+    // a thing — so the next prose chunk should land in a fresh Slack
+    // message. tool_call_updates for an already-known tool (status
+    // change, body grow) have isNewTool=false and don't close, so a
+    // long-running tool's incremental updates don't fragment the
+    // surrounding agent text.
     await this.flushAgentMessage(session);
-    if (isNewTool && session.turnToolCallIds.length === 1) {
+    if (isNewTool) {
       this.closeAgentMessage(session);
     }
 
