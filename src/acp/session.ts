@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { basename, join } from "node:path";
 import type { Config } from "../config.js";
 import { toSlackMrkdwn } from "../formatters/markdown.js";
@@ -1222,11 +1223,15 @@ export class SessionBridge {
 //                 left would be the sessionId, which already appears in
 //                 the marker
 //
-// Additional metadata (agent name, model, mode, usage) appears on a
-// single backtick-wrapped meta line below cwd, omitting parts that
-// aren't yet known. Each parent re-render passes whatever's currently
-// on the SessionState — fields stay undefined until the corresponding
-// notification fires.
+// Layout below the title (each line omitted when the inputs aren't known):
+//   1. cwd path with the daemon's hostname appended ("_/path_ on `host`")
+//      — disambiguates threads when running multiple acp-slack daemons
+//      against the same Slack workspace.
+//   2. Agent / model / mode / usage stats on one packed line, with
+//      identifiers wrapped in backticks for monospace contrast (Slack
+//      mrkdwn doesn't support color).
+//   3. Session marker (italic, contains the full sessionId for the
+//      grep-based reattach path).
 function renderParent(opts: {
   title: string | undefined;
   cwd: string | undefined;
@@ -1247,32 +1252,49 @@ function renderParent(opts: {
     lines.push(`:robot_face: *${heading}*`);
   }
   if (opts.cwd) {
-    lines.push(`_${opts.cwd}_`);
+    lines.push(`_${opts.cwd}_ on \`${daemonHost}\``);
+  } else {
+    lines.push(`on \`${daemonHost}\``);
   }
   const metaParts: string[] = [];
-  if (opts.agentName) {
-    metaParts.push(opts.agentName);
+  const agent = friendlyAgent(opts.agentName);
+  if (agent) {
+    metaParts.push(`\`${agent}\``);
   }
   if (opts.modelId) {
-    metaParts.push(`model: \`${opts.modelId}\``);
+    metaParts.push(`\`${opts.modelId}\``);
   }
   if (opts.modeId) {
-    metaParts.push(`mode: \`${opts.modeId}\``);
+    metaParts.push(`mode \`${opts.modeId}\``);
   }
   if (typeof opts.contextUsed === "number" || typeof opts.contextSize === "number") {
     const used = formatTokens(opts.contextUsed);
     const size = formatTokens(opts.contextSize);
-    metaParts.push(`ctx: ${used}/${size}`);
+    metaParts.push(`\`${used}\`/\`${size}\``);
   }
   if (typeof opts.costAmount === "number") {
     const cur = opts.costCurrency ?? "USD";
-    metaParts.push(`cost: ${formatCost(opts.costAmount, cur)}`);
+    metaParts.push(`\`${formatCost(opts.costAmount, cur)}\``);
   }
   if (metaParts.length > 0) {
     lines.push(metaParts.join(" · "));
   }
   lines.push(sessionMarker(opts.sessionId));
   return lines.join("\n");
+}
+
+const daemonHost = hostname().split(".")[0] ?? hostname();
+
+// Strip the npm-style scope prefix from agentInfo.name so a name like
+// "@agentclientprotocol/claude-agent-acp" displays as the bare package
+// name "claude-agent-acp". Most ACP agents publish under a scope; for
+// presentation the scope is uninformative noise.
+function friendlyAgent(name: string | undefined): string | undefined {
+  if (!name) {
+    return undefined;
+  }
+  const m = name.match(/^@[^/]+\/(.+)$/);
+  return m?.[1] ?? name;
 }
 
 function formatTokens(n: number | undefined): string {
