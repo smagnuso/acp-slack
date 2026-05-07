@@ -62,13 +62,19 @@ export function createSlackApp(config: Config): SlackApp {
       log.info(`drop: unauthorized user ${m.user}`);
       return;
     }
-    const entry = threadRegistry.lookup(m.channel, m.thread_ts);
-    if (!entry) {
+    const candidates = threadRegistry.lookupAll(m.channel, m.thread_ts);
+    if (candidates.length === 0) {
       log.info(
         `drop: no bridge for thread channel=${m.channel} thread_ts=${m.thread_ts}`,
       );
       return;
     }
+    // First candidate is the preferred one (most recent live activity);
+    // fall back to others if the prompt fails (e.g. when multiple
+    // proxies share the Claude Code session DB but only one has the
+    // session in memory). The succeeding candidate gets promoted in
+    // the registry below so future routes prefer it.
+    const entry = candidates[0]!;
     const text = (m.text ?? "").trim();
     if (!text && !(m.files && m.files.length > 0)) {
       return;
@@ -100,10 +106,31 @@ export function createSlackApp(config: Config): SlackApp {
         log.warn(`image download failed: ${(err as Error).message}`);
       }
     }
-    try {
-      await entry.bridge.sendUserPrompt(entry.sessionId, text, imageBlocks);
-    } catch (err) {
-      log.warn(`session/prompt failed: ${(err as Error).message}`);
+    let routed = false;
+    let lastError: string | undefined;
+    for (const candidate of candidates) {
+      try {
+        await candidate.bridge.sendUserPrompt(
+          candidate.sessionId,
+          text,
+          imageBlocks,
+        );
+        threadRegistry.promote(candidate.bridge, m.channel, m.thread_ts);
+        routed = true;
+        break;
+      } catch (err) {
+        lastError = (err as Error).message;
+        if (candidates.length > 1) {
+          log.info(
+            `route attempt failed (${lastError}); trying next of ${candidates.length} candidate(s)`,
+          );
+        }
+      }
+    }
+    if (!routed) {
+      log.warn(
+        `session/prompt failed across ${candidates.length} bridge(s): ${lastError ?? "?"}`,
+      );
       await app.client.reactions
         .add({ channel: m.channel, timestamp: m.ts ?? "", name: "warning" })
         .catch(() => undefined);

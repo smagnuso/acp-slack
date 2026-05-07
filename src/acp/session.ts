@@ -95,6 +95,13 @@ interface SessionState {
   // expanded view can list them. The full state for each is in
   // session.toolCalls (keyed by id). Cleared on turn end.
   turnToolCallIds: string[];
+  // Per-session spinner serializer. Without this, two tool-call
+  // notifications arriving close together both see spinnerTs ===
+  // undefined, both call postMessage, and produce two Slack spinner
+  // messages — only the second's ts gets stored, so the first is
+  // orphaned and never updated/finalized. Same race shape as
+  // agentFlushChain.
+  spinnerChain: Promise<void> | undefined;
 }
 
 export interface SessionBridgeOptions {
@@ -303,6 +310,7 @@ export class SessionBridge {
       spinnerTs: undefined,
       spinnerExpanded: false,
       turnToolCallIds: [],
+      spinnerChain: undefined,
     };
     this.sessions.set(sessionId, session);
     threadRegistry.register({
@@ -451,6 +459,13 @@ export class SessionBridge {
     if (!session) {
       return;
     }
+    // A session/update arriving here means our agent process is the
+    // live owner of this session — even if multiple bridges registered
+    // the same thread on attach. Promote so subsequent inbound Slack
+    // messages route to us first.
+    if (session.threadTs) {
+      threadRegistry.promote(this, session.channel, session.threadTs);
+    }
 
     switch (kind) {
       case "agent_message_chunk": {
@@ -589,7 +604,7 @@ export class SessionBridge {
       .join("\n");
     const text =
       `:lock: *Permission requested*\n${title}\n${optionLines}\n` +
-      `_react :white_check_mark: to allow once, :x: to reject_`;
+      `_react :white_check_mark: to allow once, :unlock: to allow always, :x: to reject_`;
     await this.postOrAccumulate(session, text);
   }
 
@@ -659,7 +674,22 @@ export class SessionBridge {
   // finalizeSpinner transforms it into a small static marker between
   // prompts and answers, so the thread keeps visible structure without
   // accumulating tool-call clutter.
+  //
+  // Calls are serialized per session via spinnerChain. Without
+  // serialization, rapid tool_call notifications race on spinnerTs:
+  // two refreshes observe it undefined, both POST, the second's ts
+  // overwrites the first in state, and the first message is orphaned
+  // as a permanent "working..." in Slack.
   private async refreshSpinner(session: SessionState): Promise<void> {
+    const previous = session.spinnerChain ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(() => this.refreshSpinnerWork(session));
+    session.spinnerChain = next;
+    return next;
+  }
+
+  private async refreshSpinnerWork(session: SessionState): Promise<void> {
     if (!session.threadTs) {
       log.warn(
         `refreshSpinner with no threadTs for ${session.sessionId}; dropping`,
@@ -684,30 +714,45 @@ export class SessionBridge {
   }
 
   // Transform the per-turn spinner into a quiet, static "turn ran"
-  // marker and reset per-turn tool state. Called at turn end from both
-  // the turn_complete arm (sibling-driven turns) and the
-  // sendUserPromptWork tail (own turns).
+  // marker. Called at turn end from both the turn_complete arm
+  // (sibling-driven turns) and the sendUserPromptWork tail (own turns).
   //
   // We deliberately do NOT chat.delete the message — keeping a one-line
-  // marker between turns gives the thread visible structure (you can
-  // see at a glance where prompts and answers are separated). Past
-  // markers don't expand on :eyes: anymore (we drop turnToolCallIds),
-  // which is the simplicity trade-off; full per-turn detail lives in
-  // agent-shell. Idempotent — no-op if the spinner was never created.
+  // marker between turns gives the thread visible structure. If the
+  // user reacted :eyes: during the turn the expanded form (tool list)
+  // is preserved in the finalized text so they don't lose what they
+  // were watching when the turn ended. Idempotent — no-op if the
+  // spinner was never created.
   private async finalizeSpinner(session: SessionState): Promise<void> {
+    // Queue behind any in-flight refresh so we can't observe spinnerTs
+    // before a pending postMessage has set it (which would skip the
+    // update and leave a zombie "working..." spinner in the thread).
+    const previous = session.spinnerChain ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(() => this.finalizeSpinnerWork(session));
+    session.spinnerChain = next;
+    return next;
+  }
+
+  private async finalizeSpinnerWork(session: SessionState): Promise<void> {
     const ts = session.spinnerTs;
+    const expanded = session.spinnerExpanded;
     const count = session.turnToolCallIds.length;
+    const head =
+      count > 0
+        ? `:white_check_mark: _${count} tool${count === 1 ? "" : "s"}_`
+        : ":white_check_mark: _done_";
+    const text = expanded
+      ? renderSpinnerExpanded(session, head)
+      : head;
     session.spinnerTs = undefined;
     session.spinnerExpanded = false;
     session.turnToolCallIds = [];
     if (!ts) {
       return;
     }
-    const label =
-      count > 0
-        ? `:white_check_mark: _${count} tool${count === 1 ? "" : "s"}_`
-        : ":white_check_mark: _done_";
-    await this.opts.thread.updateMessage(session.channel, ts, label);
+    await this.opts.thread.updateMessage(session.channel, ts, text);
   }
 
   private async ensureSession(
@@ -810,6 +855,7 @@ export class SessionBridge {
       spinnerTs: undefined,
       spinnerExpanded: false,
       turnToolCallIds: [],
+      spinnerChain: undefined,
     };
     this.sessions.set(sessionId, session);
     threadRegistry.register({
@@ -1450,6 +1496,15 @@ function renderSpinner(session: SessionState): string {
   if (!session.spinnerExpanded) {
     return head;
   }
+  return renderSpinnerExpanded(session, head);
+}
+
+// Tool-list rendering shared between the active spinner (when :eyes:
+// is reacted) and finalizeSpinner's preservation of the expanded view
+// when a turn ends with the user still watching. `head` is the line
+// shown above the list — the active "working..." or the finalized
+// ":white_check_mark: _N tools_".
+function renderSpinnerExpanded(session: SessionState, head: string): string {
   const lines = [head];
   for (const id of session.turnToolCallIds) {
     const tc = session.toolCalls.get(id);
