@@ -133,7 +133,7 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
       map.get("CHANNELS_FILE") ?? "~/.agent-shell/slack-channels.json",
     ),
     showToolOutput: bool(map, "SHOW_TOOL_OUTPUT", false),
-    uploadTranscriptOnEnd: bool(map, "UPLOAD_TRANSCRIPT_ON_END", false),
+    uploadTranscriptOnEnd: bool(map, "UPLOAD_TRANSCRIPT_ON_END", true),
     hiddenMessagesDir: expandHome(
       map.get("HIDDEN_MESSAGES_DIR") ?? "~/.agent-shell/slack",
     ),

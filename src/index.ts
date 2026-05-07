@@ -64,9 +64,20 @@ async function main(): Promise<void> {
         hiddenStore,
       });
       attach.on("close", () => {
-        bridge.cleanup();
-        threadRegistry.unregisterBridge(bridge);
-        bridges.delete(socketPath);
+        // Run the transcript dump (if enabled) before tearing down so
+        // session state — channel, threadTs, sessionId — is still
+        // populated for the upload. cleanup() and unregister run in
+        // the .finally so they always happen even if upload errors.
+        void bridge
+          .uploadTranscriptsOnExit()
+          .catch((err: unknown) => {
+            log.warn(`transcript upload error: ${(err as Error).message}`);
+          })
+          .finally(() => {
+            bridge.cleanup();
+            threadRegistry.unregisterBridge(bridge);
+            bridges.delete(socketPath);
+          });
       });
       attach.on("error", (err) => {
         log.warn(`attach error: ${err.message}`);

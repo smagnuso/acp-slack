@@ -109,7 +109,7 @@ attach, then live-updates flow through.
 | `CHANNEL_PREFIX`             | empty                                | Reserved for auto-create flows; unused for now. |
 | `CHANNELS_FILE`              | `~/.agent-shell/slack-channels.json` | JSON map of cwd → channel ID. |
 | `SHOW_TOOL_OUTPUT`           | `false`                              | If true, include tool body inline (still truncated). |
-| `UPLOAD_TRANSCRIPT_ON_END`   | `false`                              | Reserved for transcript upload. |
+| `UPLOAD_TRANSCRIPT_ON_END`   | `true`                               | When the multiplex socket closes, upload the thread's contents as a markdown file attached to the same thread. Set to `false` to disable. |
 | `HIDDEN_MESSAGES_DIR`        | `~/.agent-shell/slack`               | Where 🙈-hidden message originals go. |
 | `TRUNCATED_MESSAGES_DIR`     | `~/.agent-shell/slack-truncated`     | Where full tool outputs cache for 📖 expand. |
 | `TODO_DIRECTORY`             | `~/org/todo`                         | Where bookmark reactions write TODO files. |

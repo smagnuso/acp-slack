@@ -112,6 +112,13 @@ interface SessionState {
   // in place rather than posting a fresh message per delta. Cleared
   // at turn end alongside the spinner.
   planTs: string | undefined;
+  // True once this daemon run has seen any session/update notification
+  // for this session. Eager-attached sessions (materialized from a
+  // marker scan at startup) start false and stay false until a real
+  // notification comes in — used to scope transcript-on-exit uploads
+  // to sessions that actually did something this run, not every old
+  // thread we know how to route to.
+  hadActivity: boolean;
   // 30-second timer that re-renders the spinner so its elapsed-time
   // suffix advances during long turns. Cleared at finalize and on
   // bridge cleanup.
@@ -334,6 +341,7 @@ export class SessionBridge {
       spinnerStartedAt: undefined,
       spinnerTicker: undefined,
       planTs: undefined,
+      hadActivity: false,
     };
     this.sessions.set(sessionId, session);
     threadRegistry.register({
@@ -510,6 +518,11 @@ export class SessionBridge {
     if (session.threadTs) {
       threadRegistry.promote(this, session.channel, session.threadTs);
     }
+    // Mark live activity for the transcript-on-exit upload. Without
+    // this, eager-attached sessions (no live notifications this run)
+    // would still get re-archived on bridge close, spamming threads
+    // with redundant transcripts of conversations that didn't change.
+    session.hadActivity = true;
 
     switch (kind) {
       case "agent_thought_chunk": {
@@ -912,6 +925,63 @@ export class SessionBridge {
     }
   }
 
+  // Build a markdown transcript of every thread we own and upload each
+  // to its respective thread as a file attachment. Called from the
+  // entry point's bridge-close path before cleanup, gated on
+  // config.uploadTranscriptOnEnd. Source of truth is the Slack thread
+  // itself (conversations.replies) — captures exactly what the user
+  // saw in the channel, no coupling to agent-shell's internal
+  // transcript file format.
+  async uploadTranscriptsOnExit(): Promise<void> {
+    if (!this.opts.config.uploadTranscriptOnEnd) {
+      return;
+    }
+    for (const session of this.sessions.values()) {
+      if (!session.threadTs) {
+        continue;
+      }
+      // Skip sessions we eager-attached for routing but never saw a
+      // notification for this run. Re-archiving an unchanged old
+      // thread on every daemon stop would spam Slack with duplicate
+      // transcripts.
+      if (!session.hadActivity) {
+        continue;
+      }
+      try {
+        const messages = await this.opts.thread.fetchAllReplies(
+          session.channel,
+          session.threadTs,
+        );
+        if (messages.length === 0) {
+          continue;
+        }
+        const md = formatTranscriptMarkdown({
+          sessionId: session.sessionId,
+          title: session.title,
+          cwd: session.cwd,
+          messages,
+        });
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        await this.opts.thread.uploadFile({
+          channel: session.channel,
+          threadTs: session.threadTs,
+          filename: `transcript-${session.sessionId.slice(0, 8)}-${stamp}.md`,
+          title: session.title
+            ? `Transcript: ${session.title}`
+            : `Transcript: ${session.sessionId.slice(0, 8)}`,
+          content: md,
+        });
+        log.info(
+          `transcript uploaded for ${session.sessionId.slice(0, 8)} (${messages.length} messages)`,
+        );
+      } catch (err) {
+        log.warn(
+          `transcript upload failed for ${session.sessionId.slice(0, 8)}: ${(err as Error).message}`,
+        );
+      }
+    }
+  }
+
   private async finalizeSpinner(
     session: SessionState,
     stopReason?: string,
@@ -1060,6 +1130,7 @@ export class SessionBridge {
       spinnerStartedAt: undefined,
       spinnerTicker: undefined,
       planTs: undefined,
+      hadActivity: false,
     };
     this.sessions.set(sessionId, session);
     threadRegistry.register({
@@ -1771,6 +1842,60 @@ function renderSpinner(session: SessionState): string {
     return head;
   }
   return renderSpinnerExpanded(session, head);
+}
+
+// Format the thread's messages as a markdown transcript. Includes
+// session metadata at the top, then each message in chronological
+// order with author and timestamp. Bot messages display by name; human
+// messages by Slack user id (we don't resolve to display names — keeps
+// the transcript self-contained without extra users.info calls).
+function formatTranscriptMarkdown(opts: {
+  sessionId: string;
+  title: string | undefined;
+  cwd: string | undefined;
+  messages: Array<Record<string, unknown>>;
+}): string {
+  const lines: string[] = [];
+  lines.push(`# ${opts.title ?? "Session transcript"}`);
+  lines.push("");
+  lines.push(`- **Session:** \`${opts.sessionId}\``);
+  if (opts.cwd) {
+    lines.push(`- **Cwd:** \`${opts.cwd}\``);
+  }
+  lines.push(`- **Exported:** ${new Date().toISOString()}`);
+  lines.push("");
+  lines.push("---");
+  lines.push("");
+  for (const m of opts.messages) {
+    const author = (() => {
+      const profile = m.bot_profile as
+        | { name?: string }
+        | undefined;
+      if (profile?.name) {
+        return profile.name;
+      }
+      if (typeof m.user === "string") {
+        return `<@${m.user}>`;
+      }
+      return "unknown";
+    })();
+    const tsStr = (() => {
+      if (typeof m.ts !== "string") {
+        return "";
+      }
+      const sec = Number.parseFloat(m.ts);
+      if (!Number.isFinite(sec)) {
+        return m.ts;
+      }
+      return new Date(sec * 1000).toISOString();
+    })();
+    lines.push(`## ${author} — ${tsStr}`);
+    lines.push("");
+    const text = typeof m.text === "string" ? m.text : "";
+    lines.push(text);
+    lines.push("");
+  }
+  return lines.join("\n");
 }
 
 // Compose the static turn-end marker. Picks an icon and label based on

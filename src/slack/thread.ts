@@ -144,6 +144,74 @@ export class ThreadClient {
     return matches.get(sessionId);
   }
 
+  // Fetch every reply in a thread, paginating through Slack's
+  // conversations.replies cursor. Used at session-end to build the
+  // transcript-on-exit upload.
+  async fetchAllReplies(
+    channel: string,
+    threadTs: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    const out: Array<Record<string, unknown>> = [];
+    let cursor: string | undefined;
+    while (true) {
+      let res;
+      try {
+        res = await this.app.client.conversations.replies({
+          channel,
+          ts: threadTs,
+          limit: 200,
+          cursor,
+        });
+      } catch (err) {
+        log.warn(
+          `conversations.replies failed: ${(err as Error).message}`,
+        );
+        return out;
+      }
+      const messages = res.messages ?? [];
+      for (const m of messages) {
+        out.push(m as Record<string, unknown>);
+      }
+      cursor = res.response_metadata?.next_cursor;
+      if (!cursor) {
+        return out;
+      }
+    }
+  }
+
+  // Upload arbitrary text content as a file in a thread. Used for the
+  // session-end transcript dump.
+  async uploadFile(opts: {
+    channel: string;
+    threadTs: string | undefined;
+    filename: string;
+    title?: string;
+    content: string;
+  }): Promise<void> {
+    try {
+      const args: Record<string, unknown> = {
+        channel_id: opts.channel,
+        filename: opts.filename,
+        content: opts.content,
+      };
+      if (opts.threadTs) {
+        args.thread_ts = opts.threadTs;
+      }
+      if (opts.title) {
+        args.title = opts.title;
+      }
+      // Slack's typed union for files.uploadV2 doesn't model thread_ts
+      // as optional cleanly across its destination variants; the call
+      // accepts the wire shape regardless.
+      await this.app.client.files.uploadV2(
+        // biome-ignore lint/suspicious/noExplicitAny: Slack types union
+        args as any,
+      );
+    } catch (err) {
+      log.warn(`files.uploadV2 failed: ${(err as Error).message}`);
+    }
+  }
+
   async fetchText(channel: string, ts: string): Promise<string | undefined> {
     try {
       const res = await this.app.client.conversations.replies({
