@@ -559,6 +559,7 @@ export class SessionBridge {
         await this.flushAgentMessage(session);
         this.closeAgentMessage(session);
         await this.finalizeSpinner(session, stopReason);
+        await this.postReadyMarker(session, stopReason);
         break;
       }
       case "tool_call":
@@ -822,6 +823,36 @@ export class SessionBridge {
       session.spinnerStartedAt = Date.now();
       this.startSpinnerTicker(session);
     }
+  }
+
+  // Post a "ready" line at the very bottom of the thread on a clean
+  // turn end. The in-place spinner marker (finalizeSpinner) sits up
+  // wherever the spinner originally posted — usually well above the
+  // latest agent prose for any turn that talked a lot — which makes
+  // it hard to tell from a glance that the agent is actually done.
+  // A fresh message at the bottom gives an unambiguous "your turn"
+  // signal. Skipped for non-success stop reasons (cancelled / refusal
+  // / max_tokens / etc.) — the in-place marker already labels those
+  // clearly with their own icon, and a "Ready" below would feel wrong.
+  private async postReadyMarker(
+    session: SessionState,
+    stopReason: string | undefined,
+  ): Promise<void> {
+    if (stopReason && stopReason !== "end_turn") {
+      return;
+    }
+    if (!session.threadTs) {
+      return;
+    }
+    await this.opts.thread
+      .postMessage({
+        channel: session.channel,
+        threadTs: session.threadTs,
+        text: ":white_check_mark: *Ready*",
+      })
+      .catch((err: unknown) => {
+        log.warn(`ready marker post failed: ${(err as Error).message}`);
+      });
   }
 
   // Post the per-turn spinner if it isn't up yet. Called from the
@@ -1351,6 +1382,7 @@ export class SessionBridge {
     await this.flushAgentMessage(session);
     this.closeAgentMessage(session);
     await this.finalizeSpinner(session, stopReason);
+    await this.postReadyMarker(session, stopReason);
   }
 
   // Permission reaction → session/request_permission response.
