@@ -42,19 +42,31 @@ export function createSlackApp(config: Config): SlackApp {
         url_private_download?: string;
       }>;
     }>;
+    const preview = (m.text ?? "").slice(0, 60);
+    log.info(
+      `inbound msg user=${m.user ?? "?"} channel=${m.channel ?? "?"} thread=${m.thread_ts ?? "(none)"} subtype=${m.subtype ?? "(none)"} bot=${m.bot_id ?? "(none)"} ts=${m.ts ?? "?"} text="${preview}"`,
+    );
     if ((m.subtype && m.subtype !== "file_share") || m.bot_id) {
-      return; // ignore bot/system messages
+      log.info(
+        `drop: subtype=${m.subtype ?? "(none)"} bot=${m.bot_id ?? "(none)"}`,
+      );
+      return;
     }
     if (!m.thread_ts || !m.channel || !m.user) {
-      return; // only respond inside threads we own
+      log.info(
+        `drop: missing fields thread_ts=${m.thread_ts ?? "(none)"} channel=${m.channel ?? "(none)"} user=${m.user ?? "(none)"}`,
+      );
+      return;
     }
     if (config.authorizedUsers.size > 0 && !config.authorizedUsers.has(m.user)) {
-      log.debug(`drop message from unauthorized user ${m.user}`);
+      log.info(`drop: unauthorized user ${m.user}`);
       return;
     }
     const entry = threadRegistry.lookup(m.channel, m.thread_ts);
     if (!entry) {
-      log.debug(`no bridge for thread ${m.thread_ts}`);
+      log.info(
+        `drop: no bridge for thread channel=${m.channel} thread_ts=${m.thread_ts}`,
+      );
       return;
     }
     const text = (m.text ?? "").trim();

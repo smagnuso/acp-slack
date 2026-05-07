@@ -80,17 +80,24 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
       this.connected = true;
       this.lastFrameAt = Date.now();
       log.info(`attached ${this.opts.socketPath}`);
-      this.emit("open");
-      // Send initialize so the proxy replays history.
-      void this.request("initialize", {
+      // Send initialize first; only emit "open" once the agent has
+      // acknowledged it, so listeners that want to send follow-up
+      // requests (session/list, etc.) don't race ahead of the handshake.
+      this.request("initialize", {
         protocolVersion: this.opts.protocolVersion ?? 1,
         clientCapabilities: this.opts.clientCapabilities ?? {
           fs: { readTextFile: false, writeTextFile: false },
           terminal: false,
         },
-      }).catch((err: Error) => {
-        log.warn(`initialize failed on ${this.opts.socketPath}: ${err.message}`);
-      });
+      })
+        .catch((err: Error) => {
+          log.warn(
+            `initialize failed on ${this.opts.socketPath}: ${err.message}`,
+          );
+        })
+        .finally(() => {
+          this.emit("open");
+        });
     });
 
     sock.on("data", (chunk) => {

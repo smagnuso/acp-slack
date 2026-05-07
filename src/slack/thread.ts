@@ -61,6 +61,53 @@ export class ThreadClient {
     }
   }
 
+  // Scan a channel for a thread parent we previously opened for sessionId.
+  // Identification is by the marker `_session <sessionId>_` that we
+  // embed in every parent message render — see renderParent in session.ts.
+  // Returns the parent ts (= threadTs) or undefined if not found within
+  // the safety cap.
+  //
+  // Capped at ~1000 messages (10 pages of 100) so a chatty channel can't
+  // make startup hang. If a thread is buried deeper than that, we fall
+  // back to opening a new one — the worst case is a fragmented session,
+  // not data loss.
+  async findSessionThread(
+    channel: string,
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const marker = sessionMarker(sessionId);
+    let cursor: string | undefined;
+    let scanned = 0;
+    const cap = 1000;
+    while (scanned < cap) {
+      let res;
+      try {
+        res = await this.app.client.conversations.history({
+          channel,
+          cursor,
+          limit: 100,
+        });
+      } catch (err) {
+        log.warn(
+          `findSessionThread: conversations.history(${channel}) failed: ${(err as Error).message}`,
+        );
+        return undefined;
+      }
+      const messages = res.messages ?? [];
+      for (const m of messages) {
+        if (typeof m.text === "string" && m.text.includes(marker)) {
+          return m.thread_ts ?? m.ts;
+        }
+      }
+      scanned += messages.length;
+      cursor = res.response_metadata?.next_cursor;
+      if (!cursor) {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
   async fetchText(channel: string, ts: string): Promise<string | undefined> {
     try {
       const res = await this.app.client.conversations.replies({
@@ -75,4 +122,14 @@ export class ThreadClient {
       return undefined;
     }
   }
+}
+
+// Stable, machine-greppable marker embedded in every thread-parent
+// message we render. Contains the full sessionId (not the 8-char
+// shortened display) so findSessionThread can find it again across
+// daemon restarts. Italics keep it visually unobtrusive while staying
+// in the message text (Slack metadata would also work, but text is
+// scope-free and survives chat.update without ceremony).
+export function sessionMarker(sessionId: string): string {
+  return `_session ${sessionId}_`;
 }

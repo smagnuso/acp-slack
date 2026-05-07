@@ -12,7 +12,7 @@ import { threadRegistry } from "../slack/registry.js";
 import { ChannelMap } from "../storage/channels.js";
 import { HiddenStore } from "../storage/hidden.js";
 import { TruncatedStore, fullExpand, truncate } from "../storage/truncated.js";
-import type { ThreadClient } from "../slack/thread.js";
+import { sessionMarker, type ThreadClient } from "../slack/thread.js";
 import { logger } from "../util/log.js";
 import type { AcpAttach } from "./attach.js";
 import type { JsonRpcNotification, JsonRpcRequest } from "./protocol.js";
@@ -34,10 +34,37 @@ interface SessionState {
   channel: string;
   // Pending tool calls in flight, keyed by toolCallId.
   toolCalls: Map<string, ToolCallState>;
-  // Streaming agent message: chunks accumulated until turn-complete or
-  // the next message starts. We post a single Slack message at flush time.
+  // Streaming agent message. Chunks accumulate for the lifetime of one
+  // agent message; flushAgentMessage posts on the first flush and updates
+  // the same Slack message on subsequent flushes, so one agent burst
+  // shows up as one live-streaming Slack message rather than fragmenting
+  // each time the periodic flush fires. closeAgentMessage clears these
+  // (called on turn_complete, before tool cards, before sibling user
+  // messages, etc.) so the next stream begins a fresh Slack message.
   agentChunks: string[];
   agentMessageTs: string | undefined;
+  // Last text written to Slack for the currently-open agent message; used
+  // to skip no-op updates when a flush fires with no new chunks.
+  agentLastSent: string | undefined;
+  // Per-session flush serializer. Concurrent calls (periodic timer +
+  // turn_complete arm + user_message_chunk arm + own-turn end after
+  // session/prompt) would otherwise race on agentMessageTs — both seeing
+  // it undefined, both calling postMessage, producing two Slack messages
+  // for one agent burst. Each flush queues onto this chain so the
+  // post-and-set-ts step is effectively atomic.
+  agentFlushChain: Promise<void> | undefined;
+  // Per-session inbound-prompt serializer. Bolt runs app.message handlers
+  // in parallel; without this, three Slack messages typed in quick
+  // succession produce three concurrent session/prompt requests, the
+  // proxy synthesizes user_message_chunks for all of them back-to-back,
+  // and sibling frontends (agent-shell) merge them into a single rendered
+  // prompt because no agent activity falls between them. Queueing forces
+  // turn-by-turn flow: each prompt awaits the previous one's response
+  // (and our own-turn-end close) before sending.
+  promptChain: Promise<void> | undefined;
+  // Streaming user message from another frontend (the primary, e.g.
+  // agent-shell typing into the same session). Same flush model as agent.
+  userChunks: string[];
   // Last known title for chat.update of the thread header.
   title: string | undefined;
   // CWD of the session (used for per-project channel mapping).
@@ -88,9 +115,29 @@ export class SessionBridge {
   // `liveQuietMs`. See SessionBridge class doc.
   private live: boolean;
   private liveTimer: NodeJS.Timeout | undefined;
+  // Sessions we've learned about but haven't surfaced to Slack yet
+  // (because we're still in replay). When the bridge goes live we open
+  // threads for any entry here that isn't already a live SessionState.
+  private discovered = new Map<
+    string,
+    { sessionId: string; cwd?: string; title?: string }
+  >();
+
+  // Texts of session/prompt requests we sent ourselves, kept around so we
+  // can suppress the user_message_chunk that acp-multiplex synthesizes
+  // back to all attached frontends (us included). FIFO per session;
+  // entries time out so we don't leak if the proxy doesn't echo.
+  private recentOwnPrompts = new Map<
+    string,
+    Array<{ text: string; at: number }>
+  >();
+  private static readonly OWN_PROMPT_TTL_MS = 60_000;
 
   constructor(private readonly opts: SessionBridgeOptions) {
     this.live = opts.config.backfillHistory;
+    opts.attach.on("open", () => {
+      void this.discoverSessions();
+    });
     opts.attach.on("notification", (n) => {
       this.bumpLiveTimer();
       void this.onNotification(n);
@@ -102,6 +149,41 @@ export class SessionBridge {
     if (!this.live) {
       this.bumpLiveTimer();
     }
+  }
+
+  // Pre-fetches metadata for any session the agent reports via
+  // session/list. Does NOT open threads — agents like opencode keep their
+  // entire session history here (we've seen 100+) and we'd flood Slack
+  // with dormant threads. Threads still open lazily in ensureSession on
+  // the first live notification for a session; discovery just lets us
+  // apply the right cwd/title at that moment.
+  private async discoverSessions(): Promise<void> {
+    let sessions: Array<Record<string, unknown>> = [];
+    try {
+      const result = await this.opts.attach.request<{
+        sessions?: Array<Record<string, unknown>>;
+      }>("session/list", {});
+      sessions = result.sessions ?? [];
+    } catch (err) {
+      log.debug(
+        `session/list not supported on ${this.opts.attach.socketPath}: ${(err as Error).message}`,
+      );
+      return;
+    }
+    for (const s of sessions) {
+      const sessionId = (s.sessionId ?? s.id) as string | undefined;
+      if (!sessionId) {
+        continue;
+      }
+      this.discovered.set(sessionId, {
+        sessionId,
+        cwd: typeof s.cwd === "string" ? s.cwd : undefined,
+        title: typeof s.title === "string" ? s.title : undefined,
+      });
+    }
+    log.info(
+      `discovered metadata for ${this.discovered.size} session(s) on ${this.opts.attach.socketPath}`,
+    );
   }
 
   private bumpLiveTimer(): void {
@@ -200,14 +282,31 @@ export class SessionBridge {
         const content = (update.content ?? {}) as Record<string, unknown>;
         const text = (content.text ?? "") as string;
         if (text.length > 0) {
+          await this.flushUserMessage(session);
           session.agentChunks.push(text);
+          log.debug(
+            `agent_chunk ${sessionId.slice(0, 8)} +${text.length}ch (buf=${session.agentChunks.length})`,
+          );
         }
         break;
       }
       case "user_message_chunk": {
-        // Echo of what another frontend (or this bridge via Slack) typed.
-        // We don't post these — they're already visible as the originating
-        // Slack message.
+        const content = (update.content ?? {}) as Record<string, unknown>;
+        const text = (content.text ?? "") as string;
+        if (text.length > 0) {
+          await this.flushAgentMessage(session);
+          this.closeAgentMessage(session);
+          session.userChunks.push(text);
+        }
+        break;
+      }
+      case "turn_complete": {
+        // Synthesized by acp-multiplex when the agent's session/prompt
+        // response arrives. Finalize any open streaming agent message so
+        // the next turn's chunks start a fresh Slack message.
+        log.info(`turn_complete ${sessionId.slice(0, 8)}`);
+        await this.flushAgentMessage(session);
+        this.closeAgentMessage(session);
         break;
       }
       case "tool_call":
@@ -281,6 +380,7 @@ export class SessionBridge {
       return;
     }
     let state = session.toolCalls.get(toolCallId);
+    const isFirstCard = !state || !state.threadMessageTs;
     if (!state) {
       state = {
         toolCallId,
@@ -317,9 +417,17 @@ export class SessionBridge {
       }
     }
 
-    // Flush any pending agent message before switching to a tool-call card,
-    // so order in the thread mirrors event order.
+    // Flush any pending agent message before the tool card so thread
+    // ordering mirrors event order. On the first card for this tool we
+    // also close the agent message — subsequent agent chunks should land
+    // in a new Slack message below the card, not silently update the
+    // earlier one above it. tool_call_updates that refresh an existing
+    // card don't close, so a long-running tool whose status updates
+    // intermittently doesn't fragment the surrounding agent text.
     await this.flushAgentMessage(session);
+    if (isFirstCard) {
+      this.closeAgentMessage(session);
+    }
 
     const headerLine = renderToolCallHeader({
       status: state.status,
@@ -395,7 +503,10 @@ export class SessionBridge {
     sessionId: string,
     params: Record<string, unknown>,
   ): Promise<SessionState | undefined> {
-    const cwd = this.cwdFromParams(params);
+    // Prefer cwd from the live notification, fall back to whatever
+    // session/list told us about this sessionId.
+    const known = this.discovered.get(sessionId);
+    const cwd = this.cwdFromParams(params) ?? known?.cwd;
     const channel = this.resolveChannel(cwd);
     if (!channel) {
       log.warn(
@@ -404,22 +515,50 @@ export class SessionBridge {
       );
       return undefined;
     }
-    // Open the thread first so threadTs is known before the SessionState
-    // is published into the sessions map. Otherwise concurrent
-    // notifications would race in, see a session-with-no-threadTs, and
-    // post unthreaded.
-    const initial = `:robot_face: *${cwd ? basename(cwd) : sessionId}*\n_session ${sessionId.slice(0, 8)}_`;
-    const r = await this.opts.thread.postMessage({
+    // Reattach to the thread we already opened for this session, if any.
+    // The marker `_session <id>_` written into every parent-message render
+    // makes this fully Slack-resident — daemon restarts (or a fresh
+    // machine) rebuild the mapping on demand without any local state.
+    let threadTs: string | undefined;
+    const existing = await this.opts.thread.findSessionThread(
       channel,
-      text: initial,
-    });
+      sessionId,
+    );
+    if (existing) {
+      threadTs = existing;
+      log.info(
+        `reattached to thread ${existing} in ${channel} for sessionId=${sessionId}`,
+      );
+    } else {
+      // Open the thread first so threadTs is known before the SessionState
+      // is published into the sessions map. Otherwise concurrent
+      // notifications would race in, see a session-with-no-threadTs, and
+      // post unthreaded.
+      const initial = renderParent({
+        title: undefined,
+        cwd,
+        sessionId,
+      });
+      const r = await this.opts.thread.postMessage({
+        channel,
+        text: initial,
+      });
+      threadTs = r.threadTs;
+      log.info(
+        `opened thread ${r.threadTs} in ${channel} for sessionId=${sessionId}`,
+      );
+    }
     const session: SessionState = {
       sessionId,
-      threadTs: r.threadTs,
+      threadTs,
       channel,
       toolCalls: new Map(),
       agentChunks: [],
       agentMessageTs: undefined,
+      agentLastSent: undefined,
+      agentFlushChain: undefined,
+      promptChain: undefined,
+      userChunks: [],
       title: undefined,
       cwd,
     };
@@ -428,11 +567,14 @@ export class SessionBridge {
       bridge: this,
       sessionId,
       channel: session.channel,
-      threadTs: r.threadTs,
+      threadTs,
     });
-    log.info(
-      `opened thread ${r.threadTs} in ${channel} for sessionId=${sessionId}`,
-    );
+    // If discovery already gave us a title, apply it so the header
+    // reflects the topic immediately rather than waiting for a
+    // title-changed event.
+    if (known?.title) {
+      await this.applyTitle(sessionId, known.title).catch(() => undefined);
+    }
     return session;
   }
 
@@ -463,23 +605,41 @@ export class SessionBridge {
     if (!session.threadTs) {
       return;
     }
-    const cwd = session.cwd ? `\n_${session.cwd}_` : "";
     await this.opts.thread.updateMessage(
       session.channel,
       session.threadTs,
-      `:robot_face: *${title}*${cwd}`,
+      renderParent({ title, cwd: session.cwd, sessionId }),
     );
   }
 
-  // Flush accumulated agent message chunks as a single Slack message and
-  // start a new accumulation buffer.
+  // Push the agent's accumulated text to Slack. First flush of a new
+  // agent message posts; subsequent flushes update the same message in
+  // place, so a single agent burst stays as one live Slack message even
+  // if streaming has internal pauses that fire the periodic flush.
+  // Chunks are NOT cleared here — closeAgentMessage finalizes and resets
+  // state when something else needs to post (tool card, sibling user
+  // message, turn end).
+  //
+  // Calls are serialized per session via agentFlushChain. Without
+  // serialization, a periodic-timer flush and a turn_complete-arm flush
+  // can both observe agentMessageTs === undefined, both call postMessage,
+  // and produce two Slack messages for one agent burst (the second
+  // replacing the first as the live message but the first lingering as
+  // an orphan).
   async flushAgentMessage(session: SessionState): Promise<void> {
+    const previous = session.agentFlushChain ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(() => this.flushAgentMessageWork(session));
+    session.agentFlushChain = next;
+    return next;
+  }
+
+  private async flushAgentMessageWork(session: SessionState): Promise<void> {
     if (session.agentChunks.length === 0) {
       return;
     }
     if (!session.threadTs) {
-      // Should not happen: createSession only publishes a session once
-      // its threadTs is set. Bail noisily if we ever do.
       log.warn(
         `flushAgentMessage with no threadTs for ${session.sessionId}; dropping`,
       );
@@ -487,25 +647,84 @@ export class SessionBridge {
       return;
     }
     const text = toSlackMrkdwn(session.agentChunks.join(""));
-    session.agentChunks = [];
     if (!text.trim()) {
       return;
     }
-    const r = await this.opts.thread.postMessage({
-      channel: session.channel,
-      threadTs: session.threadTs,
-      text,
-    });
-    session.agentMessageTs = r.ts;
+    if (text === session.agentLastSent) {
+      return;
+    }
+    if (session.agentMessageTs) {
+      log.info(
+        `flush update ${session.sessionId.slice(0, 8)} ts=${session.agentMessageTs} ${text.length}ch`,
+      );
+      await this.opts.thread.updateMessage(
+        session.channel,
+        session.agentMessageTs,
+        text,
+      );
+    } else {
+      log.info(
+        `flush post ${session.sessionId.slice(0, 8)} ${text.length}ch`,
+      );
+      const r = await this.opts.thread.postMessage({
+        channel: session.channel,
+        threadTs: session.threadTs,
+        text,
+      });
+      session.agentMessageTs = r.ts;
+    }
+    session.agentLastSent = text;
   }
 
-  // Convenience: post text right now, flushing any pending agent message
-  // first to preserve ordering.
+  // Finalize the current agent Slack message; the next agent stream will
+  // start a fresh message rather than appending into this one. Call after
+  // flushing whenever something else is about to post into the thread.
+  private closeAgentMessage(session: SessionState): void {
+    session.agentChunks = [];
+    session.agentMessageTs = undefined;
+    session.agentLastSent = undefined;
+  }
+
+  // Flush accumulated user-message chunks (input from another frontend
+  // attached to the same session — typically the primary agent-shell
+  // typing). Drops the message if it matches a prompt we just sent
+  // ourselves, since acp-multiplex broadcasts the synthesized
+  // user_message_chunk back to every frontend.
+  async flushUserMessage(session: SessionState): Promise<void> {
+    if (session.userChunks.length === 0) {
+      return;
+    }
+    const text = session.userChunks.join("");
+    session.userChunks = [];
+    if (!text.trim()) {
+      return;
+    }
+    if (this.consumeOwnPrompt(session.sessionId, text)) {
+      return;
+    }
+    if (!session.threadTs) {
+      log.warn(
+        `flushUserMessage with no threadTs for ${session.sessionId}; dropping`,
+      );
+      return;
+    }
+    await this.opts.thread.postMessage({
+      channel: session.channel,
+      threadTs: session.threadTs,
+      text: `:speech_balloon: ${toSlackMrkdwn(text)}`,
+    });
+  }
+
+  // Convenience: post text right now, flushing any pending agent or user
+  // message first to preserve ordering. Closes the agent message so any
+  // subsequent agent chunks start a fresh Slack message below this one.
   private async postOrAccumulate(
     session: SessionState,
     text: string,
   ): Promise<void> {
+    await this.flushUserMessage(session);
     await this.flushAgentMessage(session);
+    this.closeAgentMessage(session);
     if (!session.threadTs) {
       log.warn(
         `postOrAccumulate with no threadTs for ${session.sessionId}; dropping`,
@@ -519,11 +738,43 @@ export class SessionBridge {
     });
   }
 
-  // Called by the entry point on a periodic timer to flush idle agent text.
+  // Called by the entry point on a periodic timer to flush idle text.
   async flushAll(): Promise<void> {
     for (const s of this.sessions.values()) {
+      await this.flushUserMessage(s);
       await this.flushAgentMessage(s);
     }
+  }
+
+  private rememberOwnPrompt(sessionId: string, text: string): void {
+    if (!text) {
+      return;
+    }
+    const list = this.recentOwnPrompts.get(sessionId) ?? [];
+    list.push({ text, at: Date.now() });
+    this.recentOwnPrompts.set(sessionId, list);
+  }
+
+  private consumeOwnPrompt(sessionId: string, text: string): boolean {
+    const list = this.recentOwnPrompts.get(sessionId);
+    if (!list || list.length === 0) {
+      return false;
+    }
+    const cutoff = Date.now() - SessionBridge.OWN_PROMPT_TTL_MS;
+    while (list.length > 0) {
+      const head = list[0];
+      if (!head || head.at < cutoff) {
+        list.shift();
+        continue;
+      }
+      break;
+    }
+    const idx = list.findIndex((e) => e.text === text);
+    if (idx === -1) {
+      return false;
+    }
+    list.splice(idx, 1);
+    return true;
   }
 
   // ---- Inbound (Slack -> agent) ----
@@ -533,9 +784,31 @@ export class SessionBridge {
     text: string,
     images: ReadonlyArray<{ type: "image"; mimeType: string; data: string }> = [],
   ): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      log.warn(`sendUserPrompt for unknown session ${sessionId}`);
+      return;
+    }
+    const previous = session.promptChain ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(() => this.sendUserPromptWork(session, text, images));
+    session.promptChain = next;
+    return next;
+  }
+
+  private async sendUserPromptWork(
+    session: SessionState,
+    text: string,
+    images: ReadonlyArray<{ type: "image"; mimeType: string; data: string }>,
+  ): Promise<void> {
+    const sessionId = session.sessionId;
     log.info(
       `prompt -> ${sessionId.slice(0, 8)}: ${text.slice(0, 80)}${images.length > 0 ? ` [+${images.length} image(s)]` : ""}`,
     );
+    if (text) {
+      this.rememberOwnPrompt(sessionId, text);
+    }
     const prompt: Array<Record<string, unknown>> = [];
     if (text) {
       prompt.push({ type: "text", text });
@@ -547,6 +820,14 @@ export class SessionBridge {
       sessionId,
       prompt,
     });
+    // When we are the originator, acp-multiplex excludes us from the
+    // synthesized turn_complete broadcast (proxy.go: broadcastExcept).
+    // The session/prompt response is the turn-end signal for this side,
+    // so finalize the agent message here — otherwise the next turn's
+    // chunks would chat.update into this turn's still-open message.
+    log.info(`own-turn end ${sessionId.slice(0, 8)}`);
+    await this.flushAgentMessage(session);
+    this.closeAgentMessage(session);
   }
 
   // Permission reaction → session/request_permission response.
@@ -769,6 +1050,22 @@ export class SessionBridge {
       2,
     );
   }
+}
+
+// Render the thread's parent-message text. Always includes
+// sessionMarker(sessionId) so a daemon restart can locate this thread by
+// scanning channel history (ThreadClient.findSessionThread). Title and
+// cwd are optional — title is unset until the agent emits a
+// session/title-changed; cwd may be missing for sessions that don't
+// expose one.
+function renderParent(opts: {
+  title: string | undefined;
+  cwd: string | undefined;
+  sessionId: string;
+}): string {
+  const heading = opts.title ?? (opts.cwd ? basename(opts.cwd) : opts.sessionId);
+  const cwdLine = opts.cwd ? `\n_${opts.cwd}_` : "";
+  return `:robot_face: *${heading}*${cwdLine}\n${sessionMarker(opts.sessionId)}`;
 }
 
 function renderPlan(update: Record<string, unknown>): string | undefined {

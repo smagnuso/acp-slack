@@ -26,7 +26,7 @@ async function main(): Promise<void> {
   log.info(`config loaded from ${path}`);
   log.info(`socket dir: ${config.socketDir}`);
   log.info(
-    `authorized users: ${config.authorizedUsers.size > 0 ? Array.from(config.authorizedUsers).join(",") : "(none — Slack inbound disabled)"}`,
+    `authorized users: ${config.authorizedUsers.size > 0 ? Array.from(config.authorizedUsers).join(",") + " (whitelist)" : "(empty — all Slack users allowed)"}`,
   );
 
   const slack = createSlackApp(config);
