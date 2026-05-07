@@ -69,6 +69,19 @@ interface SessionState {
   title: string | undefined;
   // CWD of the session (used for per-project channel mapping).
   cwd: string | undefined;
+  // Per-session agent state observed from streaming notifications.
+  // modeId tracks current_mode_update; modelId tracks
+  // current_model_update (acp-multiplex synthesizes both on the
+  // corresponding session/set_* responses). Usage fields track
+  // usage_update notifications: contextUsed/Size are token counts
+  // for the active context window; cost is the running cost the
+  // agent reports for the session.
+  modeId: string | undefined;
+  modelId: string | undefined;
+  contextUsed: number | undefined;
+  contextSize: number | undefined;
+  costAmount: number | undefined;
+  costCurrency: string | undefined;
 }
 
 export interface SessionBridgeOptions {
@@ -108,6 +121,13 @@ export class SessionBridge {
       options: Array<{ optionId: string; name: string; kind?: string }>;
     }
   >();
+  // Human-readable name for this proxy/bridge, set via the proxy's
+  // ACP_MULTIPLEX_NAME env var and delivered as the first frame on a
+  // secondary attach (acp-multiplex/meta notification). Per-proxy, not
+  // per-session, so the same name applies to every session that runs in
+  // the same agent process. Used as a fallback heading in renderParent
+  // between the agent-supplied title and basename(cwd).
+  private bridgeName: string | undefined;
 
   // When backfillHistory is true, we surface every replayed event. When
   // false (the default), we discard the proxy's history replay and only
@@ -170,6 +190,14 @@ export class SessionBridge {
       );
       return;
     }
+    // Log the shape of the first session entry so we can see what fields
+    // the agent actually returns beyond what we currently consume
+    // (sessionId/cwd/title). Useful for surfacing more data later.
+    if (sessions.length > 0 && sessions[0]) {
+      log.info(
+        `session/list entry shape: ${Object.keys(sessions[0]).sort().join(", ")}`,
+      );
+    }
     for (const s of sessions) {
       const sessionId = (s.sessionId ?? s.id) as string | undefined;
       if (!sessionId) {
@@ -214,10 +242,30 @@ export class SessionBridge {
   }
 
   private async onNotification(n: JsonRpcNotification): Promise<void> {
+    const params = (n.params ?? {}) as Record<string, unknown>;
+    // acp-multiplex/meta is delivered as the very first frame on a
+    // secondary attach (cache.go: meta replays before initialize).
+    // It's proxy-level metadata, not session activity, so handle it
+    // before the live-gate would drop it as "replayed history."
+    if (n.method === "acp-multiplex/meta") {
+      const name = typeof params.name === "string" ? params.name : undefined;
+      if (name && name !== this.bridgeName) {
+        this.bridgeName = name;
+        log.info(`bridge name: ${name}`);
+        // Refresh any threads we've already opened so they pick up the
+        // new heading. Usually this is empty (meta arrives during the
+        // initial replay window before the bridge has gone live and
+        // opened any thread), but we re-render defensively.
+        for (const session of this.sessions.values()) {
+          await this.refreshParent(session).catch(() => undefined);
+        }
+      }
+      return;
+    }
+
     if (!this.live) {
       return; // drop replayed history; only act on live events
     }
-    const params = (n.params ?? {}) as Record<string, unknown>;
     const sessionId = (params.sessionId ?? params.session_id) as
       | string
       | undefined;
@@ -235,6 +283,33 @@ export class SessionBridge {
       }
       return;
     }
+  }
+
+  // Re-render the thread parent with the current state. Used when
+  // proxy-level metadata (e.g. bridgeName) arrives after a thread is
+  // already open, or any other case where the heading inputs change
+  // outside of session/title-changed.
+  private async refreshParent(session: SessionState): Promise<void> {
+    if (!session.threadTs) {
+      return;
+    }
+    await this.opts.thread.updateMessage(
+      session.channel,
+      session.threadTs,
+      renderParent({
+        title: session.title,
+        cwd: session.cwd,
+        sessionId: session.sessionId,
+        bridgeName: this.bridgeName,
+        agentName: this.opts.attach.agentInfo?.name,
+        modelId: session.modelId,
+        modeId: session.modeId,
+        contextUsed: session.contextUsed,
+        contextSize: session.contextSize,
+        costAmount: session.costAmount,
+        costCurrency: session.costCurrency,
+      }),
+    );
   }
 
   private async onRequest(r: JsonRpcRequest): Promise<void> {
@@ -322,10 +397,55 @@ export class SessionBridge {
         }
         break;
       }
+      case "current_mode_update": {
+        const newMode = update.currentModeId as string | undefined;
+        if (newMode && session.modeId !== newMode) {
+          session.modeId = newMode;
+          await this.refreshParent(session).catch(() => undefined);
+        }
+        break;
+      }
+      case "current_model_update": {
+        const newModel = update.currentModelId as string | undefined;
+        if (newModel && session.modelId !== newModel) {
+          session.modelId = newModel;
+          await this.refreshParent(session).catch(() => undefined);
+        }
+        break;
+      }
+      case "usage_update": {
+        // Shape: {used, size, cost: {amount, currency}}. Track diffs
+        // so unchanged updates don't churn chat.update calls on the
+        // parent — usage_update can fire multiple times within a turn.
+        const used = update.used as number | undefined;
+        const size = update.size as number | undefined;
+        const cost = (update.cost ?? {}) as Record<string, unknown>;
+        const amount = cost.amount as number | undefined;
+        const currency = cost.currency as string | undefined;
+        let changed = false;
+        if (typeof used === "number" && session.contextUsed !== used) {
+          session.contextUsed = used;
+          changed = true;
+        }
+        if (typeof size === "number" && session.contextSize !== size) {
+          session.contextSize = size;
+          changed = true;
+        }
+        if (typeof amount === "number" && session.costAmount !== amount) {
+          session.costAmount = amount;
+          changed = true;
+        }
+        if (typeof currency === "string" && session.costCurrency !== currency) {
+          session.costCurrency = currency;
+          changed = true;
+        }
+        if (changed) {
+          await this.refreshParent(session).catch(() => undefined);
+        }
+        break;
+      }
       case "available_commands_update":
-      case "current_mode_update":
       case "config_option_update":
-      case "usage_update":
         // Ignored — no slack-relevant signal.
         break;
       default:
@@ -538,6 +658,14 @@ export class SessionBridge {
         title: undefined,
         cwd,
         sessionId,
+        bridgeName: this.bridgeName,
+        agentName: this.opts.attach.agentInfo?.name,
+        modelId: undefined,
+        modeId: undefined,
+        contextUsed: undefined,
+        contextSize: undefined,
+        costAmount: undefined,
+        costCurrency: undefined,
       });
       const r = await this.opts.thread.postMessage({
         channel,
@@ -561,6 +689,12 @@ export class SessionBridge {
       userChunks: [],
       title: undefined,
       cwd,
+      modeId: undefined,
+      modelId: undefined,
+      contextUsed: undefined,
+      contextSize: undefined,
+      costAmount: undefined,
+      costCurrency: undefined,
     };
     this.sessions.set(sessionId, session);
     threadRegistry.register({
@@ -608,7 +742,19 @@ export class SessionBridge {
     await this.opts.thread.updateMessage(
       session.channel,
       session.threadTs,
-      renderParent({ title, cwd: session.cwd, sessionId }),
+      renderParent({
+        title,
+        cwd: session.cwd,
+        sessionId,
+        bridgeName: this.bridgeName,
+        agentName: this.opts.attach.agentInfo?.name,
+        modelId: session.modelId,
+        modeId: session.modeId,
+        contextUsed: session.contextUsed,
+        contextSize: session.contextSize,
+        costAmount: session.costAmount,
+        costCurrency: session.costCurrency,
+      }),
     );
   }
 
@@ -865,6 +1011,7 @@ export class SessionBridge {
     }
     switch (action) {
       case "allow":
+      case "allow_always":
       case "deny":
         if (!added) {
           return;
@@ -907,20 +1054,29 @@ export class SessionBridge {
 
   private async handleAllowDeny(
     sessionId: string,
-    action: "allow" | "deny",
+    action: "allow" | "allow_always" | "deny",
   ): Promise<void> {
     const pending = this.permissionResolvers.get(sessionId);
     if (!pending) {
       return;
     }
-    // Map allow/deny → first matching option id from the agent-supplied set.
-    const wantKind: ReadonlyArray<string> =
-      action === "allow"
+    // Map the reaction to a kind ordering. The first option whose kind
+    // matches in priority order wins; if nothing matches we fall back to
+    // the agent's first option (some agents don't tag option kinds).
+    const priority: ReadonlyArray<string> =
+      action === "allow_always"
+        ? ["allow_always", "allow_once"]
+        : action === "allow"
         ? ["allow_once", "allow_always"]
         : ["reject_once", "reject_always"];
-    const opt =
-      pending.options.find((o) => o.kind && wantKind.includes(o.kind)) ??
-      pending.options[0];
+    let opt: typeof pending.options[number] | undefined;
+    for (const want of priority) {
+      opt = pending.options.find((o) => o.kind === want);
+      if (opt) {
+        break;
+      }
+    }
+    opt = opt ?? pending.options[0];
     const optionId = opt?.optionId;
     if (!optionId) {
       await this.respondToPermission(sessionId, "cancel");
@@ -1054,18 +1210,87 @@ export class SessionBridge {
 
 // Render the thread's parent-message text. Always includes
 // sessionMarker(sessionId) so a daemon restart can locate this thread by
-// scanning channel history (ThreadClient.findSessionThread). Title and
-// cwd are optional — title is unset until the agent emits a
-// session/title-changed; cwd may be missing for sessions that don't
-// expose one.
+// scanning channel history (ThreadClient.findSessionThread).
+//
+// Heading priority:
+//   title       — agent-supplied per-session, e.g. via session/title-changed
+//   bridgeName  — proxy-supplied per-process via ACP_MULTIPLEX_NAME and the
+//                 acp-multiplex/meta notification; same name across every
+//                 session running in that proxy
+//   basename(cwd) — derived per-session
+//   none        — fall back to just the marker line, since the only thing
+//                 left would be the sessionId, which already appears in
+//                 the marker
+//
+// Additional metadata (agent name, model, mode, usage) appears on a
+// single backtick-wrapped meta line below cwd, omitting parts that
+// aren't yet known. Each parent re-render passes whatever's currently
+// on the SessionState — fields stay undefined until the corresponding
+// notification fires.
 function renderParent(opts: {
   title: string | undefined;
   cwd: string | undefined;
   sessionId: string;
+  bridgeName: string | undefined;
+  agentName: string | undefined;
+  modelId: string | undefined;
+  modeId: string | undefined;
+  contextUsed: number | undefined;
+  contextSize: number | undefined;
+  costAmount: number | undefined;
+  costCurrency: string | undefined;
 }): string {
-  const heading = opts.title ?? (opts.cwd ? basename(opts.cwd) : opts.sessionId);
-  const cwdLine = opts.cwd ? `\n_${opts.cwd}_` : "";
-  return `:robot_face: *${heading}*${cwdLine}\n${sessionMarker(opts.sessionId)}`;
+  const heading =
+    opts.title ?? opts.bridgeName ?? (opts.cwd ? basename(opts.cwd) : undefined);
+  const lines: string[] = [];
+  if (heading) {
+    lines.push(`:robot_face: *${heading}*`);
+  }
+  if (opts.cwd) {
+    lines.push(`_${opts.cwd}_`);
+  }
+  const metaParts: string[] = [];
+  if (opts.agentName) {
+    metaParts.push(opts.agentName);
+  }
+  if (opts.modelId) {
+    metaParts.push(`model: \`${opts.modelId}\``);
+  }
+  if (opts.modeId) {
+    metaParts.push(`mode: \`${opts.modeId}\``);
+  }
+  if (typeof opts.contextUsed === "number" || typeof opts.contextSize === "number") {
+    const used = formatTokens(opts.contextUsed);
+    const size = formatTokens(opts.contextSize);
+    metaParts.push(`ctx: ${used}/${size}`);
+  }
+  if (typeof opts.costAmount === "number") {
+    const cur = opts.costCurrency ?? "USD";
+    metaParts.push(`cost: ${formatCost(opts.costAmount, cur)}`);
+  }
+  if (metaParts.length > 0) {
+    lines.push(metaParts.join(" · "));
+  }
+  lines.push(sessionMarker(opts.sessionId));
+  return lines.join("\n");
+}
+
+function formatTokens(n: number | undefined): string {
+  if (typeof n !== "number") {
+    return "?";
+  }
+  if (n >= 1_000_000) {
+    return `${(n / 1_000_000).toFixed(1)}M`;
+  }
+  if (n >= 1_000) {
+    return `${(n / 1_000).toFixed(0)}k`;
+  }
+  return `${n}`;
+}
+
+function formatCost(amount: number, currency: string): string {
+  const sym = currency === "USD" ? "$" : `${currency} `;
+  return `${sym}${amount.toFixed(2)}`;
 }
 
 function renderPlan(update: Record<string, unknown>): string | undefined {

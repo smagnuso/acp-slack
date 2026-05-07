@@ -45,6 +45,10 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
   private connected = false;
   // Track time of last received message — used by staleness detection.
   private lastFrameAt = 0;
+  // Captured from the initialize response. Identifies the upstream ACP
+  // agent (e.g. {name: "claude-code-acp", version: "..."}). Available
+  // after the "open" event fires.
+  private _agentInfo: { name?: string; version?: string } | undefined;
 
   constructor(private readonly opts: AttachOptions) {
     super();
@@ -70,6 +74,10 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
     return this.lastFrameAt;
   }
 
+  get agentInfo(): { name?: string; version?: string } | undefined {
+    return this._agentInfo;
+  }
+
   start(): void {
     log.debug(`connecting ${this.opts.socketPath}`);
     const sock = createConnection(this.opts.socketPath);
@@ -83,13 +91,24 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
       // Send initialize first; only emit "open" once the agent has
       // acknowledged it, so listeners that want to send follow-up
       // requests (session/list, etc.) don't race ahead of the handshake.
-      this.request("initialize", {
-        protocolVersion: this.opts.protocolVersion ?? 1,
-        clientCapabilities: this.opts.clientCapabilities ?? {
-          fs: { readTextFile: false, writeTextFile: false },
-          terminal: false,
+      this.request<{ agentInfo?: { name?: string; version?: string } }>(
+        "initialize",
+        {
+          protocolVersion: this.opts.protocolVersion ?? 1,
+          clientCapabilities: this.opts.clientCapabilities ?? {
+            fs: { readTextFile: false, writeTextFile: false },
+            terminal: false,
+          },
         },
-      })
+      )
+        .then((result) => {
+          if (result?.agentInfo && typeof result.agentInfo === "object") {
+            this._agentInfo = result.agentInfo;
+            log.info(
+              `agent ${result.agentInfo.name ?? "?"}${result.agentInfo.version ? ` ${result.agentInfo.version}` : ""} on ${this.opts.socketPath}`,
+            );
+          }
+        })
         .catch((err: Error) => {
           log.warn(
             `initialize failed on ${this.opts.socketPath}: ${err.message}`,

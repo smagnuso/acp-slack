@@ -2,6 +2,7 @@
 
 export type ReactionAction =
   | "allow"
+  | "allow_always"
   | "deny"
   | "hide"
   | "expand_truncated"
@@ -12,8 +13,8 @@ export type ReactionAction =
 const MAP: Record<string, ReactionAction> = {
   white_check_mark: "allow",
   "+1": "allow",
-  unlock: "allow",
   star: "allow",
+  unlock: "allow_always",
   x: "deny",
   "-1": "deny",
 

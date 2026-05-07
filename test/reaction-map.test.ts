@@ -2,10 +2,14 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { reactionAction } from "../src/slack/reaction-map.js";
 
-test("maps allow reactions", () => {
-  for (const r of ["white_check_mark", "+1", "unlock", "star"]) {
+test("maps allow-once reactions", () => {
+  for (const r of ["white_check_mark", "+1", "star"]) {
     assert.equal(reactionAction(r), "allow");
   }
+});
+
+test("maps allow-always reaction", () => {
+  assert.equal(reactionAction("unlock"), "allow_always");
 });
 
 test("maps deny reactions", () => {
