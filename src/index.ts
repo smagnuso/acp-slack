@@ -64,6 +64,7 @@ async function main(): Promise<void> {
         hiddenStore,
       });
       attach.on("close", () => {
+        bridge.cleanup();
         threadRegistry.unregisterBridge(bridge);
         bridges.delete(socketPath);
       });

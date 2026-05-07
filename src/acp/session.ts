@@ -102,6 +102,20 @@ interface SessionState {
   // orphaned and never updated/finalized. Same race shape as
   // agentFlushChain.
   spinnerChain: Promise<void> | undefined;
+  // Wall-clock time (ms since epoch) when the current spinner was
+  // posted. Used to render an elapsed-time indicator on the spinner
+  // head so the user can see the agent is still alive on long turns.
+  // Cleared at finalize.
+  spinnerStartedAt: number | undefined;
+  // Slack ts of the current turn's plan message. Each plan
+  // notification redelivers the full updated plan, so we chat.update
+  // in place rather than posting a fresh message per delta. Cleared
+  // at turn end alongside the spinner.
+  planTs: string | undefined;
+  // 30-second timer that re-renders the spinner so its elapsed-time
+  // suffix advances during long turns. Cleared at finalize and on
+  // bridge cleanup.
+  spinnerTicker: NodeJS.Timeout | undefined;
 }
 
 export interface SessionBridgeOptions {
@@ -139,6 +153,12 @@ export class SessionBridge {
       requestId: string | number;
       toolCallId: string;
       options: Array<{ optionId: string; name: string; kind?: string }>;
+      // Slack ts of the posted ":lock: Permission requested" message.
+      // Captured so that an acp-multiplex/permission_resolved notification
+      // (sent when another frontend answers first) can chat.delete the
+      // stale prompt instead of leaving it as zombie UI.
+      promptTs: string | undefined;
+      promptChannel: string | undefined;
     }
   >();
   // Human-readable name for this proxy/bridge, set via the proxy's
@@ -311,6 +331,9 @@ export class SessionBridge {
       spinnerExpanded: false,
       turnToolCallIds: [],
       spinnerChain: undefined,
+      spinnerStartedAt: undefined,
+      spinnerTicker: undefined,
+      planTs: undefined,
     };
     this.sessions.set(sessionId, session);
     threadRegistry.register({
@@ -355,6 +378,27 @@ export class SessionBridge {
     // secondary attach (cache.go: meta replays before initialize).
     // It's proxy-level metadata, not session activity, so handle it
     // before the live-gate would drop it as "replayed history."
+    // A sibling frontend answered a permission request before us. Tear
+    // down our (now-stale) Slack prompt. Lives outside the live-gate
+    // because — like meta — it's a transient proxy-level signal, not
+    // session activity. Idempotent: if we don't have an entry for the
+    // requestId, no-op.
+    if (n.method === "acp-multiplex/permission_resolved") {
+      const requestId = params.requestId as string | number | undefined;
+      if (requestId === undefined) {
+        return;
+      }
+      for (const [sessionId, entry] of this.permissionResolvers) {
+        if (entry.requestId === requestId) {
+          await this.resolvePermissionEntry(sessionId, entry).catch(
+            () => undefined,
+          );
+          return;
+        }
+      }
+      return;
+    }
+
     if (n.method === "acp-multiplex/meta") {
       const name = typeof params.name === "string" ? params.name : undefined;
       if (name && name !== this.bridgeName) {
@@ -468,11 +512,21 @@ export class SessionBridge {
     }
 
     switch (kind) {
+      case "agent_thought_chunk": {
+        // We don't surface thought content in Slack (it's noisy and
+        // intentionally a diagnostic view in agent-shell), but the
+        // existence is the earliest signal that a turn is actually
+        // running. Post the spinner now so the user has proof of life
+        // before any agent text or tool call materializes.
+        await this.ensureSpinner(session);
+        break;
+      }
       case "agent_message_chunk": {
         const content = (update.content ?? {}) as Record<string, unknown>;
         const text = (content.text ?? "") as string;
         if (text.length > 0) {
           await this.flushUserMessage(session);
+          await this.ensureSpinner(session);
           session.agentChunks.push(text);
           log.debug(
             `agent_chunk ${sessionId.slice(0, 8)} +${text.length}ch (buf=${session.agentChunks.length})`,
@@ -507,10 +561,14 @@ export class SessionBridge {
         break;
       }
       case "plan": {
-        // Render agent plans/todos as a single message.
+        // Each plan notification re-emits the full plan with updated
+        // per-step statuses. Post the first one as a fresh message,
+        // then chat.update in place on subsequent deltas so the
+        // single plan message evolves rather than the thread filling
+        // with restated copies.
         const planText = renderPlan(update);
         if (planText) {
-          await this.postOrAccumulate(session, "*Plan*\n" + planText);
+          await this.upsertPlan(session, planText);
         }
         break;
       }
@@ -590,12 +648,6 @@ export class SessionBridge {
     }>;
     const title = (toolCall.title as string | undefined) ?? "Permission requested";
 
-    this.permissionResolvers.set(sessionId, {
-      requestId: r.id,
-      toolCallId,
-      options,
-    });
-
     const optionLines = options
       .map(
         (o) =>
@@ -605,7 +657,32 @@ export class SessionBridge {
     const text =
       `:lock: *Permission requested*\n${title}\n${optionLines}\n` +
       `_react :white_check_mark: to allow once, :unlock: to allow always, :x: to reject_`;
-    await this.postOrAccumulate(session, text);
+    const promptTs = await this.postOrAccumulate(session, text);
+    this.permissionResolvers.set(sessionId, {
+      requestId: r.id,
+      toolCallId,
+      options,
+      promptTs,
+      promptChannel: session.channel,
+    });
+  }
+
+  // Resolve a permission entry: clear from the resolver map and, if the
+  // prompt was actually posted to Slack, delete it. Used both when a
+  // sibling frontend answered first (acp-multiplex/permission_resolved
+  // notification) and when this client itself answered (so we can drop
+  // the now-irrelevant prompt — the user already gave their reaction).
+  private async resolvePermissionEntry(
+    sessionId: string,
+    entry: NonNullable<ReturnType<typeof this.permissionResolvers.get>>,
+  ): Promise<void> {
+    this.permissionResolvers.delete(sessionId);
+    if (entry.promptTs && entry.promptChannel) {
+      await this.opts.thread.deleteMessage(
+        entry.promptChannel,
+        entry.promptTs,
+      );
+    }
   }
 
   private async handleToolCallUpdate(
@@ -710,6 +787,45 @@ export class SessionBridge {
         text,
       });
       session.spinnerTs = r.ts;
+      session.spinnerStartedAt = Date.now();
+      this.startSpinnerTicker(session);
+    }
+  }
+
+  // Post the per-turn spinner if it isn't up yet. Called from the
+  // earliest indicators of agent activity (agent_thought_chunk,
+  // agent_message_chunk) so the spinner appears as soon as the turn
+  // is moving — not just when the first tool_call fires. After the
+  // spinner exists, agent text and tool updates use refreshSpinner
+  // directly; no need to call ensureSpinner repeatedly.
+  private async ensureSpinner(session: SessionState): Promise<void> {
+    if (session.spinnerTs) {
+      return;
+    }
+    await this.refreshSpinner(session);
+  }
+
+  // 30-second ticker that re-renders the spinner so its elapsed-time
+  // suffix advances on long turns. Provides proof of life — if the
+  // suffix keeps advancing the agent is still doing something. Each
+  // tick goes through refreshSpinner, so it queues on spinnerChain
+  // alongside tool-call updates and never races on spinnerTs.
+  private startSpinnerTicker(session: SessionState): void {
+    if (session.spinnerTicker) {
+      return;
+    }
+    session.spinnerTicker = setInterval(() => {
+      if (!session.spinnerTs) {
+        return;
+      }
+      void this.refreshSpinner(session).catch(() => undefined);
+    }, 30_000);
+  }
+
+  private stopSpinnerTicker(session: SessionState): void {
+    if (session.spinnerTicker) {
+      clearInterval(session.spinnerTicker);
+      session.spinnerTicker = undefined;
     }
   }
 
@@ -723,7 +839,20 @@ export class SessionBridge {
   // is preserved in the finalized text so they don't lose what they
   // were watching when the turn ended. Idempotent — no-op if the
   // spinner was never created.
+  // Called by the entry point on bridge close (attach.on("close")).
+  // Stops anything timer-based we own per session so the bridge object
+  // can be garbage-collected and we don't keep firing intervals against
+  // a torn-down attach.
+  cleanup(): void {
+    for (const session of this.sessions.values()) {
+      this.stopSpinnerTicker(session);
+    }
+  }
+
   private async finalizeSpinner(session: SessionState): Promise<void> {
+    // Stop the ticker synchronously so it can't fire a refresh after
+    // we've cleared spinnerTs (which would post a fresh spinner).
+    this.stopSpinnerTicker(session);
     // Queue behind any in-flight refresh so we can't observe spinnerTs
     // before a pending postMessage has set it (which would skip the
     // update and leave a zombie "working..." spinner in the thread).
@@ -739,16 +868,23 @@ export class SessionBridge {
     const ts = session.spinnerTs;
     const expanded = session.spinnerExpanded;
     const count = session.turnToolCallIds.length;
-    const head =
+    const elapsed = session.spinnerStartedAt
+      ? Date.now() - session.spinnerStartedAt
+      : 0;
+    const elapsedSuffix = elapsed > 0 ? ` (${formatElapsed(elapsed)})` : "";
+    const body =
       count > 0
-        ? `:white_check_mark: _${count} tool${count === 1 ? "" : "s"}_`
-        : ":white_check_mark: _done_";
+        ? `${count} tool${count === 1 ? "" : "s"}${elapsedSuffix}`
+        : `done${elapsedSuffix}`;
+    const head = `:white_check_mark: _${body}_`;
     const text = expanded
       ? renderSpinnerExpanded(session, head)
       : head;
     session.spinnerTs = undefined;
     session.spinnerExpanded = false;
     session.turnToolCallIds = [];
+    session.spinnerStartedAt = undefined;
+    session.planTs = undefined;
     if (!ts) {
       return;
     }
@@ -856,6 +992,9 @@ export class SessionBridge {
       spinnerExpanded: false,
       turnToolCallIds: [],
       spinnerChain: undefined,
+      spinnerStartedAt: undefined,
+      spinnerTicker: undefined,
+      planTs: undefined,
     };
     this.sessions.set(sessionId, session);
     threadRegistry.register({
@@ -1025,10 +1164,46 @@ export class SessionBridge {
   // Convenience: post text right now, flushing any pending agent or user
   // message first to preserve ordering. Closes the agent message so any
   // subsequent agent chunks start a fresh Slack message below this one.
+  // Post or update the per-turn plan message. First call posts; later
+  // calls chat.update the same ts so a single plan evolves in place.
+  // Cleared at turn end (finalizeSpinnerWork) so the next turn starts
+  // a fresh plan message.
+  private async upsertPlan(
+    session: SessionState,
+    planText: string,
+  ): Promise<void> {
+    const text = `*Plan*\n${planText}`;
+    if (session.planTs) {
+      await this.opts.thread.updateMessage(
+        session.channel,
+        session.planTs,
+        text,
+      );
+      return;
+    }
+    // Flush any in-flight agent stream so the plan message lands at
+    // the right point in thread order, then post.
+    await this.flushUserMessage(session);
+    await this.flushAgentMessage(session);
+    this.closeAgentMessage(session);
+    if (!session.threadTs) {
+      log.warn(
+        `upsertPlan with no threadTs for ${session.sessionId}; dropping`,
+      );
+      return;
+    }
+    const r = await this.opts.thread.postMessage({
+      channel: session.channel,
+      threadTs: session.threadTs,
+      text,
+    });
+    session.planTs = r.ts;
+  }
+
   private async postOrAccumulate(
     session: SessionState,
     text: string,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     await this.flushUserMessage(session);
     await this.flushAgentMessage(session);
     this.closeAgentMessage(session);
@@ -1036,13 +1211,14 @@ export class SessionBridge {
       log.warn(
         `postOrAccumulate with no threadTs for ${session.sessionId}; dropping`,
       );
-      return;
+      return undefined;
     }
-    await this.opts.thread.postMessage({
+    const r = await this.opts.thread.postMessage({
       channel: session.channel,
       threadTs: session.threadTs,
       text,
     });
+    return r.ts;
   }
 
   // Called by the entry point on a periodic timer to flush idle text.
@@ -1148,16 +1324,19 @@ export class SessionBridge {
       log.debug(`no pending permission for ${sessionId}`);
       return;
     }
-    this.permissionResolvers.delete(sessionId);
     if (optionId === "cancel") {
       this.opts.attach.reply(pending.requestId, {
         outcome: { outcome: "cancelled" },
       });
-      return;
+    } else {
+      this.opts.attach.reply(pending.requestId, {
+        outcome: { outcome: "selected", optionId },
+      });
     }
-    this.opts.attach.reply(pending.requestId, {
-      outcome: { outcome: "selected", optionId },
-    });
+    // Clear the entry and remove the now-resolved Slack prompt. The user
+    // reacted, the agent has its answer; leaving the lock prompt around
+    // would clutter the thread and tempt accidental re-reactions.
+    await this.resolvePermissionEntry(sessionId, pending);
   }
 
   async handleReaction(
@@ -1491,12 +1670,40 @@ function formatCost(amount: number, currency: string): string {
 // reacts :eyes: on the spinner, spinnerExpanded flips to true and the
 // list of tool calls in this turn appears inline below the spinner
 // header. Removing the reaction collapses again.
+//
+// After 30s of elapsed time the head grows an "(elapsed)" suffix that
+// updates every 30s via the spinner ticker (see startSpinnerTicker).
+// This serves as proof of life on long-running turns.
 function renderSpinner(session: SessionState): string {
-  const head = ":hourglass_flowing_sand: _working..._";
+  const elapsed = session.spinnerStartedAt
+    ? Date.now() - session.spinnerStartedAt
+    : 0;
+  const suffix =
+    elapsed >= 30_000 ? ` (${formatElapsed(elapsed)})` : "";
+  const head = `:hourglass_flowing_sand: _working...${suffix}_`;
   if (!session.spinnerExpanded) {
     return head;
   }
   return renderSpinnerExpanded(session, head);
+}
+
+// Compact human-readable elapsed-time formatter.
+//   0s..59s    → "Xs"
+//   1m..59m    → "Xm" or "Xm Ys" if Y > 0
+//   1h+        → "Xh" or "Xh Ym" if Y > 0
+function formatElapsed(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  if (totalSec < 60) {
+    return `${totalSec}s`;
+  }
+  const totalMin = Math.floor(totalSec / 60);
+  const remSec = totalSec % 60;
+  if (totalMin < 60) {
+    return remSec > 0 ? `${totalMin}m ${remSec}s` : `${totalMin}m`;
+  }
+  const totalHr = Math.floor(totalMin / 60);
+  const remMin = totalMin % 60;
+  return remMin > 0 ? `${totalHr}h ${remMin}m` : `${totalHr}h`;
 }
 
 // Tool-list rendering shared between the active spinner (when :eyes:
