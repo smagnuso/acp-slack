@@ -50,23 +50,6 @@ async function main(): Promise<void> {
     }
   }, FLUSH_INTERVAL_MS);
 
-  // Watchdog: log a warning if a socket has been silent past the staleness
-  // threshold. Sockets are local Unix so silence usually means the agent
-  // is idle, not that the connection died — informational only.
-  const WATCHDOG_INTERVAL_MS = 60_000;
-  const watchdog = setInterval(() => {
-    const now = Date.now();
-    const limitMs = config.websocketStaleThreshold * 1000;
-    for (const ctx of bridges.values()) {
-      const idleMs = now - ctx.attach.lastFrameTime;
-      if (idleMs > limitMs) {
-        log.warn(
-          `socket ${ctx.attach.socketPath} silent for ${Math.round(idleMs / 1000)}s`,
-        );
-      }
-    }
-  }, WATCHDOG_INTERVAL_MS);
-
   const watcher = new SocketWatcher({
     dir: config.socketDir,
     onAdd(socketPath) {
@@ -104,7 +87,6 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     log.info(`received ${signal}, shutting down`);
     clearInterval(flushTimer);
-    clearInterval(watchdog);
     try {
       await watcher.stop();
       // Flush any pending text before tearing down.
