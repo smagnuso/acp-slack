@@ -83,6 +83,18 @@ interface SessionState {
   contextSize: number | undefined;
   costAmount: number | undefined;
   costCurrency: string | undefined;
+  // Per-turn collapsed spinner state. While the agent is running tools,
+  // a single Slack message replaces the per-tool-call cards: collapsed
+  // to ":hourglass_flowing_sand: _working..._" by default, expanded to
+  // a header list of tool calls when the user reacts :eyes: on it.
+  // Deleted entirely at turn end so the thread doesn't accumulate
+  // mechanical tool-call clutter.
+  spinnerTs: string | undefined;
+  spinnerExpanded: boolean;
+  // Tool-call ids that have appeared in this turn, in order, so the
+  // expanded view can list them. The full state for each is in
+  // session.toolCalls (keyed by id). Cleared on turn end.
+  turnToolCallIds: string[];
 }
 
 export interface SessionBridgeOptions {
@@ -379,10 +391,12 @@ export class SessionBridge {
       case "turn_complete": {
         // Synthesized by acp-multiplex when the agent's session/prompt
         // response arrives. Finalize any open streaming agent message so
-        // the next turn's chunks start a fresh Slack message.
+        // the next turn's chunks start a fresh Slack message, and remove
+        // the per-turn spinner.
         log.info(`turn_complete ${sessionId.slice(0, 8)}`);
         await this.flushAgentMessage(session);
         this.closeAgentMessage(session);
+        await this.finalizeSpinner(session);
         break;
       }
       case "tool_call":
@@ -501,7 +515,7 @@ export class SessionBridge {
       return;
     }
     let state = session.toolCalls.get(toolCallId);
-    const isFirstCard = !state || !state.threadMessageTs;
+    const isNewTool = !state;
     if (!state) {
       state = {
         toolCallId,
@@ -512,6 +526,7 @@ export class SessionBridge {
         bodyChunks: [],
       };
       session.toolCalls.set(toolCallId, state);
+      session.turnToolCallIds.push(toolCallId);
     }
     if (typeof update.status === "string") {
       state.status = update.status;
@@ -538,65 +553,74 @@ export class SessionBridge {
       }
     }
 
-    // Flush any pending agent message before the tool card so thread
-    // ordering mirrors event order. On the first card for this tool we
-    // also close the agent message — subsequent agent chunks should land
-    // in a new Slack message below the card, not silently update the
-    // earlier one above it. tool_call_updates that refresh an existing
-    // card don't close, so a long-running tool whose status updates
-    // intermittently doesn't fragment the surrounding agent text.
+    // Flush and close any pending agent message before the spinner so
+    // thread ordering mirrors event order. closeAgentMessage only fires
+    // on the first tool of the turn — subsequent tool updates within the
+    // turn don't disturb the surrounding agent prose.
     await this.flushAgentMessage(session);
-    if (isFirstCard) {
+    if (isNewTool && session.turnToolCallIds.length === 1) {
       this.closeAgentMessage(session);
     }
 
-    const headerLine = renderToolCallHeader({
-      status: state.status,
-      title: state.title,
-      kind: state.kind,
-    });
-    const body = state.bodyChunks.join("");
-    const text = this.opts.config.showToolOutput && body
-      ? `${headerLine}\n\`\`\`\n${truncate(body)}\n\`\`\``
-      : headerLine;
+    await this.refreshSpinner(session);
+  }
 
-    if (!state.threadMessageTs) {
-      if (!session.threadTs) {
-        log.warn(
-          `tool_call with no threadTs for ${session.sessionId}; dropping`,
-        );
-        return;
-      }
+  // Post or update the per-turn collapsed-spinner message. Replaces the
+  // previous one-Slack-message-per-tool-call rendering: every tool call
+  // in a turn merges into a single message that the user can either
+  // ignore (default) or expand inline by reacting :eyes:. At turn end
+  // finalizeSpinner transforms it into a small static marker between
+  // prompts and answers, so the thread keeps visible structure without
+  // accumulating tool-call clutter.
+  private async refreshSpinner(session: SessionState): Promise<void> {
+    if (!session.threadTs) {
+      log.warn(
+        `refreshSpinner with no threadTs for ${session.sessionId}; dropping`,
+      );
+      return;
+    }
+    const text = renderSpinner(session);
+    if (session.spinnerTs) {
+      await this.opts.thread.updateMessage(
+        session.channel,
+        session.spinnerTs,
+        text,
+      );
+    } else {
       const r = await this.opts.thread.postMessage({
         channel: session.channel,
         threadTs: session.threadTs,
         text,
       });
-      state.threadMessageTs = r.ts;
-      // Save full body for later 📖 expand.
-      if (body) {
-        this.opts.truncatedStore.save(
-          session.channel,
-          r.ts,
-          body,
-          headerLine,
-        );
-      }
-    } else {
-      await this.opts.thread.updateMessage(
-        session.channel,
-        state.threadMessageTs,
-        text,
-      );
-      if (body) {
-        this.opts.truncatedStore.save(
-          session.channel,
-          state.threadMessageTs,
-          body,
-          headerLine,
-        );
-      }
+      session.spinnerTs = r.ts;
     }
+  }
+
+  // Transform the per-turn spinner into a quiet, static "turn ran"
+  // marker and reset per-turn tool state. Called at turn end from both
+  // the turn_complete arm (sibling-driven turns) and the
+  // sendUserPromptWork tail (own turns).
+  //
+  // We deliberately do NOT chat.delete the message — keeping a one-line
+  // marker between turns gives the thread visible structure (you can
+  // see at a glance where prompts and answers are separated). Past
+  // markers don't expand on :eyes: anymore (we drop turnToolCallIds),
+  // which is the simplicity trade-off; full per-turn detail lives in
+  // agent-shell. Idempotent — no-op if the spinner was never created.
+  private async finalizeSpinner(session: SessionState): Promise<void> {
+    const ts = session.spinnerTs;
+    const count = session.turnToolCallIds.length;
+    session.spinnerTs = undefined;
+    session.spinnerExpanded = false;
+    session.turnToolCallIds = [];
+    if (!ts) {
+      return;
+    }
+    const label =
+      count > 0
+        ? `:white_check_mark: _${count} tool${count === 1 ? "" : "s"}_`
+        : ":white_check_mark: _done_";
+    await this.opts.thread.updateMessage(session.channel, ts, label);
   }
 
   private async ensureSession(
@@ -696,6 +720,9 @@ export class SessionBridge {
       contextSize: undefined,
       costAmount: undefined,
       costCurrency: undefined,
+      spinnerTs: undefined,
+      spinnerExpanded: false,
+      turnToolCallIds: [],
     };
     this.sessions.set(sessionId, session);
     threadRegistry.register({
@@ -975,6 +1002,7 @@ export class SessionBridge {
     log.info(`own-turn end ${sessionId.slice(0, 8)}`);
     await this.flushAgentMessage(session);
     this.closeAgentMessage(session);
+    await this.finalizeSpinner(session);
   }
 
   // Permission reaction → session/request_permission response.
@@ -1027,6 +1055,15 @@ export class SessionBridge {
         }
         return;
       case "expand_truncated":
+        // :eyes: on the per-turn spinner toggles whether the spinner
+        // shows just "working..." or expands to the running list of
+        // tool calls. Falls through to the normal truncated-content
+        // expand for any other message.
+        if (session.spinnerTs === ts) {
+          session.spinnerExpanded = added;
+          await this.refreshSpinner(session).catch(() => undefined);
+          return;
+        }
         if (added) {
           await this.expandTruncated(channel, ts);
         } else {
@@ -1313,6 +1350,34 @@ function formatTokens(n: number | undefined): string {
 function formatCost(amount: number, currency: string): string {
   const sym = currency === "USD" ? "$" : `${currency} `;
   return `${sym}${amount.toFixed(2)}`;
+}
+
+// Render the per-turn spinner message. Collapsed by default — just an
+// hourglass and "working..." — so a turn that does ten tool calls
+// occupies one line in the thread instead of ten cards. When the user
+// reacts :eyes: on the spinner, spinnerExpanded flips to true and the
+// list of tool calls in this turn appears inline below the spinner
+// header. Removing the reaction collapses again.
+function renderSpinner(session: SessionState): string {
+  const head = ":hourglass_flowing_sand: _working..._";
+  if (!session.spinnerExpanded) {
+    return head;
+  }
+  const lines = [head];
+  for (const id of session.turnToolCallIds) {
+    const tc = session.toolCalls.get(id);
+    if (!tc) {
+      continue;
+    }
+    lines.push(
+      renderToolCallHeader({
+        status: tc.status,
+        title: tc.title,
+        kind: tc.kind,
+      }),
+    );
+  }
+  return lines.join("\n");
 }
 
 function renderPlan(update: Record<string, unknown>): string | undefined {

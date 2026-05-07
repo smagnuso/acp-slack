@@ -49,6 +49,21 @@ export class ThreadClient {
     }
   }
 
+  async deleteMessage(channel: string, ts: string): Promise<void> {
+    try {
+      const res = await this.app.client.chat.delete({ channel, ts });
+      if (!res.ok) {
+        log.warn(`chat.delete !ok: ${JSON.stringify(res)}`);
+      }
+    } catch (err) {
+      const msg = (err as Error).message;
+      // message_not_found is fine — already gone.
+      if (!msg.includes("message_not_found")) {
+        log.warn(`chat.delete threw: ${msg}`);
+      }
+    }
+  }
+
   async addReaction(channel: string, ts: string, name: string): Promise<void> {
     try {
       await this.app.client.reactions.add({ channel, timestamp: ts, name });
