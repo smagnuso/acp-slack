@@ -663,14 +663,36 @@ export class SessionBridge {
     const text =
       `:lock: *Permission requested*\n${title}\n${optionLines}\n` +
       `_react :white_check_mark: to allow once, :unlock: to allow always, :x: to reject_`;
-    const promptTs = await this.postOrAccumulate(session, text);
-    this.permissionResolvers.set(sessionId, {
+
+    // Two-phase: register the resolver entry BEFORE the post returns so
+    // a sibling-frontend resolution (acp-multiplex/permission_resolved)
+    // that races our post finds something to clear. The promptTs is
+    // unknown until postMessage resolves, so the resolution path's
+    // chat.delete is a no-op in that case — we then delete the
+    // just-posted message ourselves below.
+    const entry: NonNullable<ReturnType<typeof this.permissionResolvers.get>> = {
       requestId: r.id,
       toolCallId,
       options,
-      promptTs,
+      promptTs: undefined,
       promptChannel: session.channel,
-    });
+    };
+    this.permissionResolvers.set(sessionId, entry);
+
+    const promptTs = await this.postOrAccumulate(session, text);
+
+    if (this.permissionResolvers.get(sessionId) === entry) {
+      // Still pending — fill in the ts so reactions and resolution
+      // notifications can tear down the message later.
+      entry.promptTs = promptTs;
+    } else if (promptTs) {
+      // Sibling resolved (or we ourselves resolved via reaction) while
+      // postMessage was in flight. The notification handler couldn't
+      // delete because we hadn't told it the ts yet — clean up now.
+      await this.opts.thread
+        .deleteMessage(session.channel, promptTs)
+        .catch(() => undefined);
+    }
   }
 
   // Resolve a permission entry: clear from the resolver map and, if the
