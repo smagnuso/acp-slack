@@ -547,12 +547,18 @@ export class SessionBridge {
       case "turn_complete": {
         // Synthesized by acp-multiplex when the agent's session/prompt
         // response arrives. Finalize any open streaming agent message so
-        // the next turn's chunks start a fresh Slack message, and remove
-        // the per-turn spinner.
-        log.info(`turn_complete ${sessionId.slice(0, 8)}`);
+        // the next turn's chunks start a fresh Slack message, and
+        // transform the per-turn spinner into a static marker. The
+        // stopReason carries through to the marker so a user-cancelled
+        // turn (agent-shell C-c, etc.) reads as "cancelled" rather
+        // than the success default.
+        const stopReason = update.stopReason as string | undefined;
+        log.info(
+          `turn_complete ${sessionId.slice(0, 8)}${stopReason ? ` (${stopReason})` : ""}`,
+        );
         await this.flushAgentMessage(session);
         this.closeAgentMessage(session);
-        await this.finalizeSpinner(session);
+        await this.finalizeSpinner(session, stopReason);
         break;
       }
       case "tool_call":
@@ -849,7 +855,10 @@ export class SessionBridge {
     }
   }
 
-  private async finalizeSpinner(session: SessionState): Promise<void> {
+  private async finalizeSpinner(
+    session: SessionState,
+    stopReason?: string,
+  ): Promise<void> {
     // Stop the ticker synchronously so it can't fire a refresh after
     // we've cleared spinnerTs (which would post a fresh spinner).
     this.stopSpinnerTicker(session);
@@ -859,12 +868,15 @@ export class SessionBridge {
     const previous = session.spinnerChain ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
-      .then(() => this.finalizeSpinnerWork(session));
+      .then(() => this.finalizeSpinnerWork(session, stopReason));
     session.spinnerChain = next;
     return next;
   }
 
-  private async finalizeSpinnerWork(session: SessionState): Promise<void> {
+  private async finalizeSpinnerWork(
+    session: SessionState,
+    stopReason?: string,
+  ): Promise<void> {
     const ts = session.spinnerTs;
     const expanded = session.spinnerExpanded;
     const count = session.turnToolCallIds.length;
@@ -872,11 +884,7 @@ export class SessionBridge {
       ? Date.now() - session.spinnerStartedAt
       : 0;
     const elapsedSuffix = elapsed > 0 ? ` (${formatElapsed(elapsed)})` : "";
-    const body =
-      count > 0
-        ? `${count} tool${count === 1 ? "" : "s"}${elapsedSuffix}`
-        : `done${elapsedSuffix}`;
-    const head = `:white_check_mark: _${body}_`;
+    const head = renderFinalMarker(count, elapsedSuffix, stopReason);
     const text = expanded
       ? renderSpinnerExpanded(session, head)
       : head;
@@ -1299,7 +1307,9 @@ export class SessionBridge {
     for (const img of images) {
       prompt.push({ type: "image", mimeType: img.mimeType, data: img.data });
     }
-    await this.opts.attach.request("session/prompt", {
+    const response = await this.opts.attach.request<{
+      stopReason?: string;
+    }>("session/prompt", {
       sessionId,
       prompt,
     });
@@ -1308,10 +1318,13 @@ export class SessionBridge {
     // The session/prompt response is the turn-end signal for this side,
     // so finalize the agent message here — otherwise the next turn's
     // chunks would chat.update into this turn's still-open message.
-    log.info(`own-turn end ${sessionId.slice(0, 8)}`);
+    const stopReason = response?.stopReason;
+    log.info(
+      `own-turn end ${sessionId.slice(0, 8)}${stopReason ? ` (${stopReason})` : ""}`,
+    );
     await this.flushAgentMessage(session);
     this.closeAgentMessage(session);
-    await this.finalizeSpinner(session);
+    await this.finalizeSpinner(session, stopReason);
   }
 
   // Permission reaction → session/request_permission response.
@@ -1685,6 +1698,38 @@ function renderSpinner(session: SessionState): string {
     return head;
   }
   return renderSpinnerExpanded(session, head);
+}
+
+// Compose the static turn-end marker. Picks an icon and label based on
+// the stopReason carried on turn_complete (or session/prompt response
+// for own turns). end_turn / no reason → success; cancelled → an
+// explicit "cancelled" indicator so a user-interrupted turn doesn't
+// look like a normal completion; other non-success reasons (refusal,
+// max_tokens, etc.) use a warning icon and include the reason text.
+function renderFinalMarker(
+  count: number,
+  elapsedSuffix: string,
+  stopReason: string | undefined,
+): string {
+  if (stopReason === "cancelled") {
+    const body =
+      count > 0
+        ? `cancelled · ${count} tool${count === 1 ? "" : "s"}${elapsedSuffix}`
+        : `cancelled${elapsedSuffix}`;
+    return `:no_entry: _${body}_`;
+  }
+  if (stopReason && stopReason !== "end_turn") {
+    const body =
+      count > 0
+        ? `${stopReason} · ${count} tool${count === 1 ? "" : "s"}${elapsedSuffix}`
+        : `${stopReason}${elapsedSuffix}`;
+    return `:warning: _${body}_`;
+  }
+  const body =
+    count > 0
+      ? `${count} tool${count === 1 ? "" : "s"}${elapsedSuffix}`
+      : `done${elapsedSuffix}`;
+  return `:white_check_mark: _${body}_`;
 }
 
 // Compact human-readable elapsed-time formatter.
