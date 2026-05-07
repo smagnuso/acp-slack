@@ -18,6 +18,12 @@ test("maps deny reactions", () => {
   }
 });
 
+test("maps cancel reactions", () => {
+  for (const r of ["stop_sign", "octagonal_sign"]) {
+    assert.equal(reactionAction(r), "cancel");
+  }
+});
+
 test("maps hide and expand reactions", () => {
   assert.equal(reactionAction("see_no_evil"), "hide");
   assert.equal(reactionAction("no_bell"), "hide");

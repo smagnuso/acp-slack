@@ -4,6 +4,7 @@ export type ReactionAction =
   | "allow"
   | "allow_always"
   | "deny"
+  | "cancel"
   | "hide"
   | "expand_truncated"
   | "expand_full"
@@ -17,6 +18,10 @@ const MAP: Record<string, ReactionAction> = {
   unlock: "allow_always",
   x: "deny",
   "-1": "deny",
+  // Targeted at the spinner ts to send session/cancel; ignored on
+  // any other message.
+  stop_sign: "cancel",
+  octagonal_sign: "cancel",
 
   see_no_evil: "hide",
   no_bell: "hide",

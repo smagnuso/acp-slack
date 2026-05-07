@@ -1372,6 +1372,21 @@ export class SessionBridge {
         }
         await this.handleAllowDeny(sessionId, action);
         return;
+      case "cancel":
+        // Only meaningful on the active spinner. Sends session/cancel
+        // to the agent; the agent's response (with stopReason
+        // "cancelled") flows through turn_complete (or our await on
+        // session/prompt for own turns) and finalizes the spinner with
+        // a "cancelled" marker.
+        if (!added) {
+          return;
+        }
+        if (session.spinnerTs !== ts) {
+          return;
+        }
+        log.info(`cancel <- slack ${sessionId.slice(0, 8)}`);
+        this.opts.attach.notify("session/cancel", { sessionId });
+        return;
       case "hide":
         if (added) {
           await this.hideMessage(channel, ts);
