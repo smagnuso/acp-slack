@@ -63,6 +63,25 @@ interface SessionState {
   // turn-by-turn flow: each prompt awaits the previous one's response
   // (and our own-turn-end close) before sending.
   promptChain: Promise<void> | undefined;
+  // Number of Slack-originated prompts currently in flight on this
+  // session (queued or running). Incremented at enqueue, decremented
+  // when the corresponding sendUserPromptWork resolves. Used to drive
+  // the queued / processing indicator: if non-zero when a new prompt
+  // arrives, the new prompt is going to wait behind something and
+  // gets a visible queue marker.
+  queuedPromptCount: number;
+  // Per-prompt entries for any prompt that posted a queue indicator
+  // (i.e. wasn't first-of-batch). Lets the cancel reaction match a
+  // user's :stop_sign: on a queued indicator to the specific prompt
+  // and splice it out of the queue before its work runs. Each entry
+  // is removed in the chain's finally regardless of how the prompt
+  // resolved (run, cancelled, errored).
+  queuedPrompts: Array<{
+    text: string;
+    promptTs: string | undefined;
+    cancelled: boolean;
+    started: boolean;
+  }>;
   // Streaming user message from another frontend (the primary, e.g.
   // agent-shell typing into the same session). Same flush model as agent.
   userChunks: string[];
@@ -325,6 +344,8 @@ export class SessionBridge {
       agentLastSent: undefined,
       agentFlushChain: undefined,
       promptChain: undefined,
+      queuedPromptCount: 0,
+      queuedPrompts: [],
       userChunks: [],
       title: known?.title,
       cwd: known?.cwd,
@@ -1114,6 +1135,8 @@ export class SessionBridge {
       agentLastSent: undefined,
       agentFlushChain: undefined,
       promptChain: undefined,
+      queuedPromptCount: 0,
+      queuedPrompts: [],
       userChunks: [],
       title: undefined,
       cwd,
@@ -1408,12 +1431,106 @@ export class SessionBridge {
       log.warn(`sendUserPrompt for unknown session ${sessionId}`);
       return;
     }
+    const wasQueued = session.queuedPromptCount > 0;
+    session.queuedPromptCount += 1;
+
+    // If this prompt is going to wait, register a queued entry the
+    // cancel reaction can target by ts, and drop a queue indicator
+    // into the thread. The post is fire-and-forget; we stash the ts
+    // back onto the entry once known so :stop_sign: on the indicator
+    // can splice this prompt out before it runs.
+    const queuedEntry: SessionState["queuedPrompts"][number] | undefined =
+      wasQueued
+        ? { text, promptTs: undefined, cancelled: false, started: false }
+        : undefined;
+    if (queuedEntry) {
+      session.queuedPrompts.push(queuedEntry);
+    }
+
+    const queueTsPromise: Promise<string | undefined> = queuedEntry
+      ? this.postQueueIndicator(session, text).then((ts) => {
+          if (queuedEntry && ts) {
+            queuedEntry.promptTs = ts;
+          }
+          return ts;
+        })
+      : Promise.resolve(undefined);
+
     const previous = session.promptChain ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
-      .then(() => this.sendUserPromptWork(session, text, images));
+      .then(async () => {
+        try {
+          if (queuedEntry?.cancelled) {
+            // User cancelled this prompt while it was still queued —
+            // skip the work entirely. The queue indicator was already
+            // updated by the cancel handler.
+            return;
+          }
+          if (queuedEntry) {
+            queuedEntry.started = true;
+            const ts = await queueTsPromise;
+            if (ts) {
+              await this.markQueueIndicatorProcessing(
+                session,
+                ts,
+                text,
+              ).catch(() => undefined);
+            }
+          }
+          await this.sendUserPromptWork(session, text, images);
+        } finally {
+          session.queuedPromptCount = Math.max(
+            0,
+            session.queuedPromptCount - 1,
+          );
+          if (queuedEntry) {
+            const idx = session.queuedPrompts.indexOf(queuedEntry);
+            if (idx >= 0) {
+              session.queuedPrompts.splice(idx, 1);
+            }
+          }
+        }
+      });
     session.promptChain = next;
     return next;
+  }
+
+  // Slack-side feedback for a Slack-originated prompt that has to wait
+  // behind another in-flight prompt. Posts immediately so the user sees
+  // their second/third-in-a-row Slack message land in the thread; the
+  // returned ts is later used by markQueueIndicatorProcessing to flip
+  // it to "processing" when its turn comes.
+  private async postQueueIndicator(
+    session: SessionState,
+    text: string,
+  ): Promise<string | undefined> {
+    if (!session.threadTs) {
+      return undefined;
+    }
+    try {
+      const r = await this.opts.thread.postMessage({
+        channel: session.channel,
+        threadTs: session.threadTs,
+        text: `:hourglass: _queued:_ ${formatPromptPreview(text)}`,
+      });
+      return r.ts;
+    } catch (err) {
+      log.warn(`queue indicator post failed: ${(err as Error).message}`);
+      return undefined;
+    }
+  }
+
+  private async markQueueIndicatorProcessing(
+    session: SessionState,
+    ts: string,
+    text: string,
+  ): Promise<void> {
+    await this.opts.thread.updateMessage(
+      session.channel,
+      ts,
+      `:arrow_forward: _processing:_ ${formatPromptPreview(text)}`,
+    );
   }
 
   private async sendUserPromptWork(
@@ -1501,21 +1618,44 @@ export class SessionBridge {
         }
         await this.handleAllowDeny(sessionId, action);
         return;
-      case "cancel":
-        // Only meaningful on the active spinner. Sends session/cancel
-        // to the agent; the agent's response (with stopReason
-        // "cancelled") flows through turn_complete (or our await on
-        // session/prompt for own turns) and finalizes the spinner with
-        // a "cancelled" marker.
+      case "cancel": {
         if (!added) {
           return;
         }
+        // Queued-prompt cancel: react on the "queued: …" indicator to
+        // splice that specific prompt out of the chain before it runs.
+        // Only valid while the entry is still genuinely waiting —
+        // started=true means the chain has already moved past the
+        // cancellation check, at which point the user should react on
+        // the spinner instead.
+        const queued = session.queuedPrompts.find(
+          (q) => q.promptTs === ts && !q.started && !q.cancelled,
+        );
+        if (queued) {
+          queued.cancelled = true;
+          log.info(
+            `queue-cancel <- slack ${sessionId.slice(0, 8)}: ${queued.text.slice(0, 80)}`,
+          );
+          await this.opts.thread
+            .updateMessage(
+              session.channel,
+              ts,
+              `:x: _cancelled (queued):_ ${formatPromptPreview(queued.text)}`,
+            )
+            .catch(() => undefined);
+          return;
+        }
+        // Spinner cancel: send session/cancel for the running turn.
+        // The agent's response (stopReason "cancelled") flows through
+        // turn_complete (or our await on session/prompt for own
+        // turns) and finalizes the spinner with a "cancelled" marker.
         if (session.spinnerTs !== ts) {
           return;
         }
         log.info(`cancel <- slack ${sessionId.slice(0, 8)}`);
         this.opts.attach.notify("session/cancel", { sessionId });
         return;
+      }
       case "hide":
         if (added) {
           await this.hideMessage(channel, ts);
@@ -1928,6 +2068,16 @@ function renderFinalMarker(
       ? `${count} tool${count === 1 ? "" : "s"}${elapsedSuffix}`
       : `done${elapsedSuffix}`;
   return `:white_check_mark: _${body}_`;
+}
+
+// Trim a prompt for inline display in a queue/processing indicator so
+// the marker stays a single line even for paragraph-length prompts.
+function formatPromptPreview(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= 200) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, 200)}…`;
 }
 
 // Compact human-readable elapsed-time formatter.
