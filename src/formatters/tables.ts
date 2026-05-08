@@ -56,7 +56,11 @@ function parseRow(line: string): string[] {
 }
 
 function formatTable(rawRows: string[]): string {
-  // First row = header, second = separator (skip), rest = data.
+  // First row = header, second = separator (skip), rest = data. Preserve
+  // GFM `|` syntax, just pad each cell to the column max so the table
+  // lines up in monospace inside the fence. Keeping `|` reads more like
+  // a familiar markdown table than the previous ─-only style and is
+  // easier to copy back out as raw markdown.
   const header = parseRow(rawRows[0] ?? "");
   const data = rawRows.slice(2).map(parseRow);
   const all: string[][] = [header, ...data];
@@ -73,10 +77,13 @@ function formatTable(rawRows: string[]): string {
   const padCell = (cell: string, w: number): string =>
     cell + " ".repeat(Math.max(0, w - cell.length));
   const renderRow = (row: string[]): string =>
-    "  " + row.map((cell, c) => padCell(cell ?? "", widths[c] ?? 0)).join("   ");
+    "| " +
+    row.map((cell, c) => padCell(cell ?? "", widths[c] ?? 0)).join(" | ") +
+    " |";
+  // Separator: |---|---|… with each segment matching column width + the
+  // surrounding " ... " padding.
   const sep =
-    "  " +
-    widths.map((w) => "─".repeat(w)).join("   ");
+    "|" + widths.map((w) => "-".repeat(w + 2)).join("|") + "|";
   const lines: string[] = ["```", renderRow(header), sep];
   for (const row of data) {
     lines.push(renderRow(row));

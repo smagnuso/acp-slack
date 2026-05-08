@@ -21,3 +21,32 @@ test("preserves fenced code untouched", () => {
   const out = toSlackMrkdwn(src);
   assert.match(out, /```\n\*\*not bold\*\* \[link\]\(u\)\n```/);
 });
+
+test("wraps ascii-art tables (─ separator) in a code fence", () => {
+  const src = [
+    "leading prose",
+    "",
+    "  #   File           Currently   Should be",
+    "  ─   ────────────   ─────────   ─────────",
+    "  1   GPUTexture.h   send        sendNoncancelable",
+    "  2   GibbonPlat.cpp send        sendCancelable",
+    "",
+    "trailing prose",
+  ].join("\n");
+  const out = toSlackMrkdwn(src);
+  // The block containing the ─ separator should now be wrapped in a fence.
+  assert.match(out, /```\n  #   File/);
+  assert.match(out, /sendCancelable\n```/);
+  // Surrounding prose stays outside fences.
+  assert.match(out, /leading prose/);
+  assert.match(out, /trailing prose/);
+});
+
+test("does not touch ascii-art tables already inside a fence", () => {
+  const src = "```\n  ─   ────\n  1   x\n```";
+  // Already fenced — wrapAsciiTables runs only outside existing fences,
+  // so we shouldn't see double-wrapping.
+  const out = toSlackMrkdwn(src);
+  // No double opening fence on its own line.
+  assert.equal(out.match(/^```$/gm)?.length, 2);
+});

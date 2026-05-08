@@ -12,9 +12,12 @@ test("converts a simple GFM table to a code-fenced aligned block", () => {
   const out = convertMarkdownTables(input);
   assert.match(out, /^```\n/);
   assert.match(out, /\n```$/);
-  // Check both rows end up aligned with the same pad widths.
-  assert.match(out, /name {0,4}   role/);
-  assert.match(out, /ada  {0,4}   engineer/);
+  // Pipe syntax preserved, columns padded to the widest cell.
+  assert.match(out, /\| name \| role {5}\|/); // role padded to "engineer" (8 chars)
+  assert.match(out, /\| ada {2}\| engineer \|/);
+  assert.match(out, /\| bob {2}\| pm {7}\|/);
+  // Separator dashes match column width + surrounding spaces.
+  assert.match(out, /\|------\|----------\|/);
 });
 
 test("leaves text without tables unchanged", () => {
