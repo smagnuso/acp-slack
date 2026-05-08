@@ -20,6 +20,13 @@ import type { JsonRpcNotification, JsonRpcRequest } from "./protocol.js";
 
 const log = logger("session");
 
+interface QueuedPromptEntry {
+  text: string;
+  promptTs: string | undefined;
+  cancelled: boolean;
+  started: boolean;
+}
+
 interface ToolCallState {
   toolCallId: string;
   threadMessageTs: string | undefined;
@@ -76,12 +83,16 @@ interface SessionState {
   // and splice it out of the queue before its work runs. Each entry
   // is removed in the chain's finally regardless of how the prompt
   // resolved (run, cancelled, errored).
-  queuedPrompts: Array<{
-    text: string;
-    promptTs: string | undefined;
-    cancelled: boolean;
-    started: boolean;
-  }>;
+  queuedPrompts: QueuedPromptEntry[];
+  // When a prompt's chain.then fires while the agent is still busy
+  // on an earlier turn (its spinner is up), we defer the queued →
+  // processing indicator transition rather than flipping it
+  // immediately. The next time refreshSpinnerWork posts a fresh
+  // spinner — which happens when the agent has finalized the prior
+  // turn and started ours — we transition this entry's indicator at
+  // that moment. Cleared after transition or when sendUserPromptWork
+  // returns (whichever comes first).
+  pendingProcessingEntry: QueuedPromptEntry | undefined;
   // Streaming user message from another frontend (the primary, e.g.
   // agent-shell typing into the same session). Same flush model as agent.
   userChunks: string[];
@@ -346,6 +357,7 @@ export class SessionBridge {
       promptChain: undefined,
       queuedPromptCount: 0,
       queuedPrompts: [],
+      pendingProcessingEntry: undefined,
       userChunks: [],
       title: known?.title,
       cwd: known?.cwd,
@@ -856,6 +868,18 @@ export class SessionBridge {
       session.spinnerTs = r.ts;
       session.spinnerStartedAt = Date.now();
       this.startSpinnerTicker(session);
+      // A fresh spinner means the agent has actually started a new
+      // turn — the truthful moment for any deferred queue indicator
+      // to flip from "queued" to "processing".
+      const pending = session.pendingProcessingEntry;
+      if (pending?.promptTs) {
+        session.pendingProcessingEntry = undefined;
+        void this.markQueueIndicatorProcessing(
+          session,
+          pending.promptTs,
+          pending.text,
+        ).catch(() => undefined);
+      }
     }
   }
 
@@ -1137,6 +1161,7 @@ export class SessionBridge {
       promptChain: undefined,
       queuedPromptCount: 0,
       queuedPrompts: [],
+      pendingProcessingEntry: undefined,
       userChunks: [],
       title: undefined,
       cwd,
@@ -1431,7 +1456,14 @@ export class SessionBridge {
       log.warn(`sendUserPrompt for unknown session ${sessionId}`);
       return;
     }
-    const wasQueued = session.queuedPromptCount > 0;
+    // wasQueued covers both "another Slack prompt is ahead of us" and
+    // "the agent is currently mid-turn on something else (e.g. an
+    // agent-shell-originated prompt)". For the latter, agents
+    // generally serialize per-session, so our session/prompt will
+    // wait for the in-flight turn to finish. An active spinner is a
+    // reliable proxy for "agent is busy on this session."
+    const wasQueued =
+      session.queuedPromptCount > 0 || session.spinnerTs !== undefined;
     session.queuedPromptCount += 1;
 
     // If this prompt is going to wait, register a queued entry the
@@ -1439,10 +1471,9 @@ export class SessionBridge {
     // into the thread. The post is fire-and-forget; we stash the ts
     // back onto the entry once known so :stop_sign: on the indicator
     // can splice this prompt out before it runs.
-    const queuedEntry: SessionState["queuedPrompts"][number] | undefined =
-      wasQueued
-        ? { text, promptTs: undefined, cancelled: false, started: false }
-        : undefined;
+    const queuedEntry: QueuedPromptEntry | undefined = wasQueued
+      ? { text, promptTs: undefined, cancelled: false, started: false }
+      : undefined;
     if (queuedEntry) {
       session.queuedPrompts.push(queuedEntry);
     }
@@ -1469,13 +1500,25 @@ export class SessionBridge {
           }
           if (queuedEntry) {
             queuedEntry.started = true;
-            const ts = await queueTsPromise;
-            if (ts) {
-              await this.markQueueIndicatorProcessing(
-                session,
-                ts,
-                text,
-              ).catch(() => undefined);
+            // Transition the indicator only if the agent is currently
+            // idle on this session (no spinner up). If a spinner is
+            // up, the agent is finishing a prior turn first — defer
+            // the transition until refreshSpinnerWork posts the next
+            // spinner (i.e. the agent picked up our prompt). Without
+            // this, "processing" appears the moment our chain runs
+            // but well before the agent actually starts on us.
+            if (!session.spinnerTs) {
+              const ts = await queueTsPromise;
+              if (ts) {
+                await this.markQueueIndicatorProcessing(
+                  session,
+                  ts,
+                  text,
+                ).catch(() => undefined);
+              }
+            } else {
+              await queueTsPromise;
+              session.pendingProcessingEntry = queuedEntry;
             }
           }
           await this.sendUserPromptWork(session, text, images);
@@ -1488,6 +1531,13 @@ export class SessionBridge {
             const idx = session.queuedPrompts.indexOf(queuedEntry);
             if (idx >= 0) {
               session.queuedPrompts.splice(idx, 1);
+            }
+            // If this entry was deferred for transition but never got
+            // there (e.g. the agent never emitted notifications for
+            // our prompt), clear the slot so it can't bleed into a
+            // future turn's spinner-post hook.
+            if (session.pendingProcessingEntry === queuedEntry) {
+              session.pendingProcessingEntry = undefined;
             }
           }
         }
