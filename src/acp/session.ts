@@ -1605,16 +1605,35 @@ export class SessionBridge {
     }
   }
 
+  // Transition a queued indicator into "processing". Rather than
+  // chat.update'ing the queued message in place — which leaves the
+  // transition stuck at its original (now scrolled-up) position in
+  // the thread — delete the queued message and post a fresh
+  // "processing" line at the bottom. The user can scan to the
+  // latest message and immediately see which prompt the agent is
+  // working on next.
   private async markQueueIndicatorProcessing(
     session: SessionState,
     ts: string,
     text: string,
   ): Promise<void> {
-    await this.opts.thread.updateMessage(
-      session.channel,
-      ts,
-      `:arrow_forward: _processing:_ ${formatPromptPreview(text)}`,
-    );
+    await this.opts.thread
+      .deleteMessage(session.channel, ts)
+      .catch(() => undefined);
+    if (!session.threadTs) {
+      return;
+    }
+    await this.opts.thread
+      .postMessage({
+        channel: session.channel,
+        threadTs: session.threadTs,
+        text: `:arrow_forward: _processing:_ ${formatPromptPreview(text)}`,
+      })
+      .catch((err: unknown) => {
+        log.warn(
+          `processing indicator post failed: ${(err as Error).message}`,
+        );
+      });
   }
 
   private async sendUserPromptWork(
