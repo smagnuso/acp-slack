@@ -1498,6 +1498,16 @@ export class SessionBridge {
     // reliable proxy for "agent is busy on this session."
     const wasQueued =
       session.queuedPromptCount > 0 || session.spinnerTs !== undefined;
+    // Number of in-flight turns the agent has to finish before getting
+    // to us. queuedPromptCount counts Slack-originated prompts; if it
+    // is 0 but a spinner is up, that's an agent-shell-originated turn
+    // we're queueing behind, so count it as 1.
+    const aheadCount =
+      session.queuedPromptCount > 0
+        ? session.queuedPromptCount
+        : session.spinnerTs
+        ? 1
+        : 0;
     session.queuedPromptCount += 1;
 
     // If this prompt is going to wait, register a queued entry the
@@ -1513,7 +1523,7 @@ export class SessionBridge {
     }
 
     const queueTsPromise: Promise<string | undefined> = queuedEntry
-      ? this.postQueueIndicator(session, text).then((ts) => {
+      ? this.postQueueIndicator(session, text, aheadCount).then((ts) => {
           if (queuedEntry && ts) {
             queuedEntry.promptTs = ts;
           }
@@ -1557,10 +1567,16 @@ export class SessionBridge {
           }
           await this.sendUserPromptWork(session, text, images);
         } finally {
-          session.queuedPromptCount = Math.max(
-            0,
-            session.queuedPromptCount - 1,
-          );
+          // Cancelled-while-queued entries already had their count
+          // dropped at cancel time so subsequent prompts saw an
+          // accurate "ahead" depth. Skip the decrement here to avoid
+          // double-counting.
+          if (!queuedEntry?.cancelled) {
+            session.queuedPromptCount = Math.max(
+              0,
+              session.queuedPromptCount - 1,
+            );
+          }
           if (queuedEntry) {
             const idx = session.queuedPrompts.indexOf(queuedEntry);
             if (idx >= 0) {
@@ -1588,15 +1604,20 @@ export class SessionBridge {
   private async postQueueIndicator(
     session: SessionState,
     text: string,
+    aheadCount: number,
   ): Promise<string | undefined> {
     if (!session.threadTs) {
       return undefined;
     }
+    const suffix =
+      aheadCount > 0
+        ? ` · ${aheadCount === 1 ? "1 ahead" : `${aheadCount} ahead`}`
+        : "";
     try {
       const r = await this.opts.thread.postMessage({
         channel: session.channel,
         threadTs: session.threadTs,
-        text: `:hourglass: _queued:_ ${formatPromptPreview(text)}`,
+        text: `:hourglass: _queued${suffix}:_ ${formatPromptPreview(text)}`,
       });
       return r.ts;
     } catch (err) {
@@ -1623,11 +1644,20 @@ export class SessionBridge {
     if (!session.threadTs) {
       return;
     }
+    // Number of prompts still queued behind us. queuedPromptCount
+    // includes our own entry until our finally decrements it, so
+    // subtract 1 here. Hidden parenthetical when the queue is empty
+    // behind us — keeps the common case clean.
+    const waiting = Math.max(0, session.queuedPromptCount - 1);
+    const suffix =
+      waiting > 0
+        ? ` · ${waiting === 1 ? "1 waiting" : `${waiting} waiting`}`
+        : "";
     await this.opts.thread
       .postMessage({
         channel: session.channel,
         threadTs: session.threadTs,
-        text: `:arrow_forward: _processing:_ ${formatPromptPreview(text)}`,
+        text: `:arrow_forward: _processing${suffix}:_ ${formatPromptPreview(text)}`,
       })
       .catch((err: unknown) => {
         log.warn(
@@ -1734,6 +1764,14 @@ export class SessionBridge {
         );
         if (queued) {
           queued.cancelled = true;
+          // Drop the count immediately so subsequent prompts compute
+          // an accurate "ahead" depth. The chain's finally checks the
+          // cancelled flag and skips its own decrement to avoid
+          // double-counting.
+          session.queuedPromptCount = Math.max(
+            0,
+            session.queuedPromptCount - 1,
+          );
           log.info(
             `queue-cancel <- slack ${sessionId.slice(0, 8)}: ${queued.text.slice(0, 80)}`,
           );
