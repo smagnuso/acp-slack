@@ -182,18 +182,23 @@ export class SessionBridge {
   // never open two threads or post into the channel before the parent ts
   // is known.
   private creating = new Map<string, Promise<SessionState | undefined>>();
-  // sessionId -> resolver for any in-flight permission request awaiting a
-  // Slack reaction.
+  // String(requestId) -> resolver for any in-flight permission request
+  // awaiting a Slack reaction. Keyed by requestId rather than sessionId
+  // because an agent can have multiple permission requests pending on
+  // the same session simultaneously (e.g. parallel tool invocations);
+  // keying by sessionId would overwrite earlier entries and leave the
+  // first prompts un-resolvable.
   permissionResolvers = new Map<
     string,
     {
       requestId: string | number;
+      sessionId: string;
       toolCallId: string;
       options: Array<{ optionId: string; name: string; kind?: string }>;
       // Slack ts of the posted ":lock: Permission requested" message.
-      // Captured so that an acp-multiplex/permission_resolved notification
-      // (sent when another frontend answers first) can chat.delete the
-      // stale prompt instead of leaving it as zombie UI.
+      // Reactions on this ts route to *this* entry; resolution
+      // notifications match by requestId; the chat.delete cleanup uses
+      // the same ts. promptChannel pairs with promptTs for delete.
       promptTs: string | undefined;
       promptChannel: string | undefined;
     }
@@ -429,13 +434,28 @@ export class SessionBridge {
       if (requestId === undefined) {
         return;
       }
-      for (const [sessionId, entry] of this.permissionResolvers) {
-        if (entry.requestId === requestId) {
-          await this.resolvePermissionEntry(sessionId, entry).catch(
-            () => undefined,
-          );
-          return;
-        }
+      // Compare via String() because the proxy synthesizes requestId
+      // as a JSON string (it's the raw-bytes-as-Go-string key from
+      // its pendingReverse map), while our entry.requestId is the
+      // parsed JSON-RPC id — typically a number. `42 === "42"` is
+      // false; coerce both sides.
+      const want = String(requestId);
+      let matched = false;
+      const entry = this.permissionResolvers.get(want);
+      if (entry) {
+        matched = true;
+        log.info(
+          `permission_resolved match requestId=${want} session=${entry.sessionId.slice(0, 8)} promptTs=${entry.promptTs ?? "(none)"}`,
+        );
+        await this.resolvePermissionEntry(entry).catch(() => undefined);
+      }
+      if (!matched) {
+        const known = Array.from(this.permissionResolvers.values()).map(
+          (e) => `${typeof e.requestId}:${String(e.requestId)}`,
+        );
+        log.info(
+          `permission_resolved miss requestId=${typeof requestId}:${want} known=[${known.join(",")}]`,
+        );
       }
       return;
     }
@@ -686,12 +706,12 @@ export class SessionBridge {
     sessionId: string,
     params: Record<string, unknown>,
   ): Promise<void> {
-    const session = await this.ensureSession(sessionId, params);
-    if (!session) {
-      // Can't surface the request; reject so agent doesn't hang.
-      this.opts.attach.replyError(r.id, -32000, "no session bridge");
-      return;
-    }
+    // Pre-register the resolver synchronously, before any await. A
+    // permission_resolved notification can fire any time after the
+    // proxy broadcasts the original session/request_permission — even
+    // before our ensureSession resolves — and the handler needs an
+    // entry to find. promptTs and promptChannel get filled in once we
+    // know them.
     const toolCall = (params.toolCall ?? {}) as Record<string, unknown>;
     const toolCallId = (toolCall.toolCallId ?? "") as string;
     const options = (params.options ?? []) as Array<{
@@ -699,8 +719,38 @@ export class SessionBridge {
       name: string;
       kind?: string;
     }>;
-    const title = (toolCall.title as string | undefined) ?? "Permission requested";
+    const key = String(r.id);
+    const entry: NonNullable<ReturnType<typeof this.permissionResolvers.get>> = {
+      requestId: r.id,
+      sessionId,
+      toolCallId,
+      options,
+      promptTs: undefined,
+      promptChannel: undefined,
+    };
+    this.permissionResolvers.set(key, entry);
+    log.info(
+      `permission requested session=${sessionId.slice(0, 8)} requestId=${typeof r.id}:${key}`,
+    );
 
+    const session = await this.ensureSession(sessionId, params);
+    if (!session) {
+      // No bridge to surface this on; clean up our stub if it's still
+      // ours and reject so the agent doesn't hang.
+      if (this.permissionResolvers.get(key) === entry) {
+        this.permissionResolvers.delete(key);
+      }
+      this.opts.attach.replyError(r.id, -32000, "no session bridge");
+      return;
+    }
+
+    // Resolved during ensureSession? Don't post a stale prompt.
+    if (this.permissionResolvers.get(key) !== entry) {
+      return;
+    }
+    entry.promptChannel = session.channel;
+
+    const title = (toolCall.title as string | undefined) ?? "Permission requested";
     const optionLines = options
       .map(
         (o) =>
@@ -711,31 +761,16 @@ export class SessionBridge {
       `:lock: *Permission requested*\n${title}\n${optionLines}\n` +
       `_react :white_check_mark: to allow once, :unlock: to allow always, :x: to reject_`;
 
-    // Two-phase: register the resolver entry BEFORE the post returns so
-    // a sibling-frontend resolution (acp-multiplex/permission_resolved)
-    // that races our post finds something to clear. The promptTs is
-    // unknown until postMessage resolves, so the resolution path's
-    // chat.delete is a no-op in that case — we then delete the
-    // just-posted message ourselves below.
-    const entry: NonNullable<ReturnType<typeof this.permissionResolvers.get>> = {
-      requestId: r.id,
-      toolCallId,
-      options,
-      promptTs: undefined,
-      promptChannel: session.channel,
-    };
-    this.permissionResolvers.set(sessionId, entry);
-
     const promptTs = await this.postOrAccumulate(session, text);
 
-    if (this.permissionResolvers.get(sessionId) === entry) {
+    if (this.permissionResolvers.get(key) === entry) {
       // Still pending — fill in the ts so reactions and resolution
       // notifications can tear down the message later.
       entry.promptTs = promptTs;
     } else if (promptTs) {
-      // Sibling resolved (or we ourselves resolved via reaction) while
-      // postMessage was in flight. The notification handler couldn't
-      // delete because we hadn't told it the ts yet — clean up now.
+      // Resolved while we were posting. The notification handler
+      // couldn't delete because we hadn't told it the ts yet — clean
+      // up the now-orphaned message ourselves.
       await this.opts.thread
         .deleteMessage(session.channel, promptTs)
         .catch(() => undefined);
@@ -748,10 +783,9 @@ export class SessionBridge {
   // notification) and when this client itself answered (so we can drop
   // the now-irrelevant prompt — the user already gave their reaction).
   private async resolvePermissionEntry(
-    sessionId: string,
     entry: NonNullable<ReturnType<typeof this.permissionResolvers.get>>,
   ): Promise<void> {
-    this.permissionResolvers.delete(sessionId);
+    this.permissionResolvers.delete(String(entry.requestId));
     if (entry.promptTs && entry.promptChannel) {
       await this.opts.thread.deleteMessage(
         entry.promptChannel,
@@ -1623,29 +1657,27 @@ export class SessionBridge {
     await this.postReadyMarker(session, stopReason);
   }
 
-  // Permission reaction → session/request_permission response.
+  // Permission reaction → session/request_permission response. Takes
+  // the resolver entry directly so the caller can target a specific
+  // permission (sessionId alone is ambiguous when several permissions
+  // for the same session are pending).
   async respondToPermission(
-    sessionId: string,
+    entry: NonNullable<ReturnType<typeof this.permissionResolvers.get>>,
     optionId: string | "cancel",
   ): Promise<void> {
-    const pending = this.permissionResolvers.get(sessionId);
-    if (!pending) {
-      log.debug(`no pending permission for ${sessionId}`);
-      return;
-    }
     if (optionId === "cancel") {
-      this.opts.attach.reply(pending.requestId, {
+      this.opts.attach.reply(entry.requestId, {
         outcome: { outcome: "cancelled" },
       });
     } else {
-      this.opts.attach.reply(pending.requestId, {
+      this.opts.attach.reply(entry.requestId, {
         outcome: { outcome: "selected", optionId },
       });
     }
     // Clear the entry and remove the now-resolved Slack prompt. The user
     // reacted, the agent has its answer; leaving the lock prompt around
     // would clutter the thread and tempt accidental re-reactions.
-    await this.resolvePermissionEntry(sessionId, pending);
+    await this.resolvePermissionEntry(entry);
   }
 
   async handleReaction(
@@ -1666,7 +1698,7 @@ export class SessionBridge {
         if (!added) {
           return;
         }
-        await this.handleAllowDeny(sessionId, action);
+        await this.handleAllowDeny(channel, ts, action);
         return;
       case "cancel": {
         if (!added) {
@@ -1750,10 +1782,21 @@ export class SessionBridge {
   }
 
   private async handleAllowDeny(
-    sessionId: string,
+    channel: string,
+    ts: string,
     action: "allow" | "allow_always" | "deny",
   ): Promise<void> {
-    const pending = this.permissionResolvers.get(sessionId);
+    // Look up the resolver entry by the Slack ts the user reacted on
+    // — the only reliable way to disambiguate multiple permission
+    // prompts on the same session. sessionId-keyed lookup picks
+    // whichever entry was set last and resolves the wrong request.
+    let pending: ReturnType<typeof this.permissionResolvers.get> | undefined;
+    for (const e of this.permissionResolvers.values()) {
+      if (e.promptTs === ts && e.promptChannel === channel) {
+        pending = e;
+        break;
+      }
+    }
     if (!pending) {
       return;
     }
@@ -1776,10 +1819,10 @@ export class SessionBridge {
     opt = opt ?? pending.options[0];
     const optionId = opt?.optionId;
     if (!optionId) {
-      await this.respondToPermission(sessionId, "cancel");
+      await this.respondToPermission(pending, "cancel");
       return;
     }
-    await this.respondToPermission(sessionId, optionId);
+    await this.respondToPermission(pending, optionId);
   }
 
   private async hideMessage(channel: string, ts: string): Promise<void> {
