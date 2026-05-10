@@ -172,6 +172,9 @@ export interface SessionBridgeOptions {
     title: string | undefined;
     agentId: string | undefined;
   };
+  // First prompt to send once attach completes. Used by !spawn so the
+  // user can spawn-and-prompt in a single Slack message.
+  initialPrompt?: string | undefined;
 }
 
 // One SessionBridge per hydra session. The discovery layer
@@ -243,17 +246,25 @@ export class SessionBridge {
     opts.attach.on("open", () => {
       // Open the Slack thread eagerly as soon as we attach to the hydra
       // session — before any agent activity — so Slack-side users can
-      // post into the thread immediately. acp-multiplex's socket-watcher
-      // had this UX implicitly because the SocketWatcher onAdd was the
-      // de facto session-existence signal; in the hydra model attach is
-      // that signal, so we hook it here.
-      void this.ensureSession(this.opts.sessionMeta.sessionId, {}).catch(
-        (err: unknown) => {
+      // post into the thread immediately.
+      const sessionId = this.opts.sessionMeta.sessionId;
+      void this.ensureSession(sessionId, {})
+        .then(async () => {
+          if (this.opts.initialPrompt) {
+            try {
+              await this.sendUserPrompt(sessionId, this.opts.initialPrompt);
+            } catch (err) {
+              log.warn(
+                `initial prompt failed for ${sessionId.slice(0, 8)}: ${(err as Error).message}`,
+              );
+            }
+          }
+        })
+        .catch((err: unknown) => {
           log.warn(
-            `eager session-open failed for ${this.opts.sessionMeta.sessionId.slice(0, 8)}: ${(err as Error).message}`,
+            `eager session-open failed for ${sessionId.slice(0, 8)}: ${(err as Error).message}`,
           );
-        },
-      );
+        });
     });
     opts.attach.on("notification", (n) => {
       this.bumpLiveTimer();

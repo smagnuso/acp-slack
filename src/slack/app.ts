@@ -1,6 +1,12 @@
 import bolt from "@slack/bolt";
 import type { Config } from "../config.js";
 import { logger } from "../util/log.js";
+import {
+  listAgents,
+  parseSpawnArgs,
+  setPendingInitialPrompt,
+  spawnSession,
+} from "./commands.js";
 import { reactionAction } from "./reaction-map.js";
 import { threadRegistry } from "./registry.js";
 
@@ -52,14 +58,27 @@ export function createSlackApp(config: Config): SlackApp {
       );
       return;
     }
-    if (!m.thread_ts || !m.channel || !m.user) {
+    if (!m.channel || !m.user || !m.ts) {
       log.info(
-        `drop: missing fields thread_ts=${m.thread_ts ?? "(none)"} channel=${m.channel ?? "(none)"} user=${m.user ?? "(none)"}`,
+        `drop: missing fields channel=${m.channel ?? "(none)"} user=${m.user ?? "(none)"} ts=${m.ts ?? "(none)"}`,
       );
       return;
     }
     if (config.authorizedUsers.size > 0 && !config.authorizedUsers.has(m.user)) {
       log.info(`drop: unauthorized user ${m.user}`);
+      return;
+    }
+    const rawText = (m.text ?? "").trim();
+    if (rawText.startsWith("!spawn")) {
+      await handleSpawn(app, config, rawText, m.channel, m.ts);
+      return;
+    }
+    if (rawText === "!agents") {
+      await handleAgents(app, config, m.channel, m.ts);
+      return;
+    }
+    if (!m.thread_ts) {
+      log.info(`drop: top-level message without bang-command`);
       return;
     }
     const candidates = threadRegistry.lookupAll(m.channel, m.thread_ts);
@@ -259,4 +278,80 @@ async function tryLookupByMessage(
   } catch {
     return undefined;
   }
+}
+
+async function handleSpawn(
+  app: bolt.App,
+  config: Config,
+  rawText: string,
+  channel: string,
+  ts: string,
+): Promise<void> {
+  const body = rawText.slice("!spawn".length);
+  const args = parseSpawnArgs(body);
+  let result;
+  try {
+    result = await spawnSession(config, args);
+  } catch (err) {
+    log.warn(`spawn failed: ${(err as Error).message}`);
+    await app.client.chat.postMessage({
+      channel,
+      thread_ts: ts,
+      text: `:warning: spawn failed: ${(err as Error).message}`,
+    });
+    return;
+  }
+  if (args.prompt) {
+    setPendingInitialPrompt(result.sessionId, args.prompt);
+  }
+  await app.client.reactions
+    .add({ channel, timestamp: ts, name: "white_check_mark" })
+    .catch(() => undefined);
+  const shortId = result.sessionId.slice(0, 8);
+  await app.client.chat.postMessage({
+    channel,
+    thread_ts: ts,
+    text:
+      `:rocket: spawning \`${result.agentId}\` in \`${result.cwd}\` ` +
+      `(session \`${shortId}\`); thread will appear once the agent is ready` +
+      (args.prompt ? "; first prompt queued" : ""),
+  });
+}
+
+async function handleAgents(
+  app: bolt.App,
+  config: Config,
+  channel: string,
+  ts: string,
+): Promise<void> {
+  let agents;
+  try {
+    agents = await listAgents(config);
+  } catch (err) {
+    log.warn(`!agents failed: ${(err as Error).message}`);
+    await app.client.chat.postMessage({
+      channel,
+      thread_ts: ts,
+      text: `:warning: agents lookup failed: ${(err as Error).message}`,
+    });
+    return;
+  }
+  if (agents.length === 0) {
+    await app.client.chat.postMessage({
+      channel,
+      thread_ts: ts,
+      text: ":information_source: no agents installed in hydra registry",
+    });
+    return;
+  }
+  const lines = agents.map((a) => {
+    const ver = a.version ? ` v${a.version}` : "";
+    const desc = a.description ? ` — ${a.description}` : "";
+    return `• \`${a.id}\`${ver}${desc}`;
+  });
+  await app.client.chat.postMessage({
+    channel,
+    thread_ts: ts,
+    text: ["*Available agents:*", ...lines].join("\n"),
+  });
 }

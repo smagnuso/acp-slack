@@ -145,8 +145,32 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
 
 ## Slash-style commands
 
-`!debug` posted in a thread replies with the session's debug info
-(socket path, sessionId, last-frame time).
+| Command | Where | Effect |
+|---------|-------|--------|
+| `!debug` | inside a thread | Replies with the session's debug info (sessionId, channel, ws state, last-frame time). |
+| `!agents` | anywhere | Lists agents installed in hydra's registry (`GET /v1/agents`). |
+| `!spawn [agent] [cwd] [prompt…]` | anywhere | Asks hydra to spawn a fresh ACP session (`POST /v1/sessions`). Both positionals are optional — hydra falls back to `defaultAgent` and `defaultCwd` from `~/.acp-hydra/config.json` (which itself defaults to `claude-code` and `~`). |
+
+`!spawn` parsing rules:
+
+- The first token, if path-like (`/…`, `~…`, `./…`), is the cwd; otherwise it's the agentId.
+- The second token, only if the first was an agentId, may be the cwd.
+- Anything remaining is the prompt sent as the session's first user message.
+- A `--` separator forces everything after it to be the prompt — useful when the prompt itself starts with a word that would otherwise be parsed as the agent (e.g. `!spawn -- what time is it?`).
+
+Examples:
+
+```
+!spawn                                  # default agent + default cwd, no first prompt
+!spawn ~/dev/foo                        # default agent in ~/dev/foo
+!spawn opencode                         # opencode in default cwd
+!spawn opencode ~/dev/foo               # both
+!spawn opencode ~/dev/foo fix the bug   # both + first prompt
+!spawn ~/dev/foo fix the bug            # cwd + default agent + first prompt
+!spawn -- what time is it?              # all defaults + first prompt
+```
+
+The bot reacts ✅ on the spawn message and replies with the resolved agent/cwd. The new thread appears in whichever channel the resolved cwd maps to (per `PER_PROJECT_CHANNELS` + `CHANNELS_FILE`), which may differ from where `!spawn` was posted.
 
 ## Tests
 
@@ -154,8 +178,8 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
 npm test
 ```
 
-Runs the formatter, ndjson, and reaction-map tests with the built-in
-Node test runner.
+Runs the formatter, ndjson, reaction-map, and command-parser tests with
+the built-in Node test runner.
 
 ## Out of scope
 
