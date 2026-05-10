@@ -19,7 +19,7 @@ export interface AttachOptions {
   sessionId: string;
   // Hydra daemon's WebSocket URL, e.g. ws://127.0.0.1:8765/acp
   daemonWsUrl: string;
-  // Bearer token, sent as the `hydra-token.<token>` WS subprotocol.
+  // Bearer token, sent as the `hydra-acp-token.<token>` WS subprotocol.
   token: string;
   // Optional initialize/clientCapabilities; sent on connect.
   clientCapabilities?: Record<string, unknown>;
@@ -69,7 +69,7 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
     return this.lastFrameAt;
   }
 
-  // Returns the upstream agent info if exposed via _meta["hydra"].agentId
+  // Returns the upstream agent info if exposed via _meta["hydra-acp"].agentId
   // on the attach response, falling back to the daemon's own agentInfo from
   // initialize.
   get agentInfo(): { name?: string; version?: string } | undefined {
@@ -82,7 +82,7 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
 
   start(): void {
     log.debug(`connecting ${this.opts.daemonWsUrl} for ${this.opts.sessionId}`);
-    const subprotocols = ["acp.v1", `hydra-token.${this.opts.token}`];
+    const subprotocols = ["acp.v1", `hydra-acp-token.${this.opts.token}`];
     let ws: WebSocket;
     try {
       ws = new WebSocket(this.opts.daemonWsUrl, subprotocols);
@@ -245,7 +245,7 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
         clientInfo: { name: "hydra-acp-slack", version: "0.1.0" },
       });
       this._attachMeta = attachResult._meta;
-      const hydraMeta = (attachResult._meta?.["hydra"] ?? {}) as {
+      const hydraMeta = (attachResult._meta?.["hydra-acp"] ?? {}) as {
         agentId?: string;
       };
       if (hydraMeta.agentId) {

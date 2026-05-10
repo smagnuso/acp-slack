@@ -475,7 +475,7 @@ export class SessionBridge {
         // prompt_received arm below, so drop the compat copy to avoid
         // double-rendering.
         const meta = (update._meta ?? {}) as Record<string, unknown>;
-        const hydraMeta = (meta["hydra"] ?? {}) as Record<string, unknown>;
+        const hydraMeta = (meta["hydra-acp"] ?? {}) as Record<string, unknown>;
         if (hydraMeta.compatFor === "prompt_received") {
           break;
         }
