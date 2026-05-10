@@ -4,7 +4,7 @@ import { SessionBridge } from "./acp/session.js";
 import { configPath, loadConfig } from "./config.js";
 import { HydraDiscovery } from "./hydra-discovery.js";
 import { createSlackApp } from "./slack/app.js";
-import { consumePendingInitialPrompt } from "./slack/commands.js";
+import { consumePendingMessages } from "./slack/resurrect.js";
 import { ThreadClient } from "./slack/thread.js";
 import { ChannelMap } from "./storage/channels.js";
 import { HiddenStore } from "./storage/hidden.js";
@@ -65,7 +65,7 @@ async function main(): Promise<void> {
         daemonWsUrl: config.hydraWsUrl,
         token: config.hydraToken,
       });
-      const initialPrompt = consumePendingInitialPrompt(sessionId);
+      const initialMessages = consumePendingMessages(sessionId);
       const bridge = new SessionBridge({
         attach,
         config,
@@ -79,7 +79,7 @@ async function main(): Promise<void> {
           title: session.title,
           agentId: session.agentId,
         },
-        initialPrompt,
+        initialMessages,
       });
       attach.on("close", () => {
         // Run the transcript dump (if enabled) before tearing down so

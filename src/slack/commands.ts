@@ -96,23 +96,6 @@ function looksLikeAgentId(s: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(s);
 }
 
-// Slack-originated prompts that need to be sent on a freshly-spawned
-// session as soon as its bridge comes up. Keyed by the sessionId
-// returned from POST /v1/sessions. Consumed by index.ts in onAdd.
-const pendingInitialPrompts = new Map<string, string>();
-
-export function setPendingInitialPrompt(sessionId: string, prompt: string): void {
-  pendingInitialPrompts.set(sessionId, prompt);
-}
-
-export function consumePendingInitialPrompt(sessionId: string): string | undefined {
-  const v = pendingInitialPrompts.get(sessionId);
-  if (v !== undefined) {
-    pendingInitialPrompts.delete(sessionId);
-  }
-  return v;
-}
-
 export interface SpawnResult {
   sessionId: string;
   agentId: string;

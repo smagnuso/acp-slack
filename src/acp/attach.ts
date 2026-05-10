@@ -96,12 +96,23 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
       this.connected = true;
       this.lastFrameAt = Date.now();
       log.info(`ws open ${this.opts.sessionId}`);
-      // Send initialize first to get hydra's agent info, then session/attach.
-      // Both happen before "open" is emitted to listeners so they don't race
-      // ahead of the handshake.
-      void this.handshake().finally(() => {
-        this.emit("open");
-      });
+      // Send initialize and session/attach before "open" is emitted to
+      // listeners; if the handshake fails (e.g. session not found and
+      // no resume hints on disk), surface as "error" + close instead of
+      // pretending the attach succeeded — otherwise listeners proceed
+      // with rendering for a bridge that hydra never registered.
+      void this.handshake()
+        .then(() => {
+          this.emit("open");
+        })
+        .catch((err: unknown) => {
+          this.emit("error", err as Error);
+          try {
+            this.ws?.close();
+          } catch {
+            void 0;
+          }
+        });
     });
 
     ws.on("message", (data, isBinary) => {

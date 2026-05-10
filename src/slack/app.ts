@@ -1,14 +1,14 @@
 import bolt from "@slack/bolt";
 import type { Config } from "../config.js";
 import { logger } from "../util/log.js";
-import {
-  listAgents,
-  parseSpawnArgs,
-  setPendingInitialPrompt,
-  spawnSession,
-} from "./commands.js";
+import { listAgents, parseSpawnArgs, spawnSession } from "./commands.js";
 import { reactionAction } from "./reaction-map.js";
 import { threadRegistry } from "./registry.js";
+import {
+  attemptResurrect,
+  bufferPendingMessage,
+  findSessionIdForThread,
+} from "./resurrect.js";
 
 const log = logger("slack");
 
@@ -82,29 +82,8 @@ export function createSlackApp(config: Config): SlackApp {
       return;
     }
     const candidates = threadRegistry.lookupAll(m.channel, m.thread_ts);
-    if (candidates.length === 0) {
-      log.info(
-        `drop: no bridge for thread channel=${m.channel} thread_ts=${m.thread_ts}`,
-      );
-      return;
-    }
-    // First candidate is the preferred one (most recent live activity);
-    // fall back to others if the prompt fails (e.g. when multiple
-    // proxies share the Claude Code session DB but only one has the
-    // session in memory). The succeeding candidate gets promoted in
-    // the registry below so future routes prefer it.
-    const entry = candidates[0]!;
     const text = (m.text ?? "").trim();
     if (!text && !(m.files && m.files.length > 0)) {
-      return;
-    }
-    if (text.startsWith("!debug")) {
-      const info = entry.bridge.debugInfo(entry.sessionId);
-      await app.client.chat.postMessage({
-        channel: m.channel,
-        thread_ts: m.thread_ts,
-        text: "```\n" + info + "\n```",
-      });
       return;
     }
     // Download any attached images and forward as multimodal content.
@@ -124,6 +103,49 @@ export function createSlackApp(config: Config): SlackApp {
       } catch (err) {
         log.warn(`image download failed: ${(err as Error).message}`);
       }
+    }
+    if (candidates.length === 0) {
+      // Thread has no live bridge — likely a cold session whose disk
+      // record outlived its agent process. Try to resurrect via a
+      // transient session/attach (hydra revives from loadFromDisk),
+      // and buffer the user's message so the new bridge picks it up
+      // when discovery's next poll catches the now-live session.
+      const sessionId = await findSessionIdForThread(
+        app,
+        m.channel,
+        m.thread_ts,
+      );
+      if (!sessionId) {
+        log.info(
+          `drop: no bridge or session marker for thread channel=${m.channel} thread_ts=${m.thread_ts}`,
+        );
+        return;
+      }
+      bufferPendingMessage(sessionId, { text, images: imageBlocks });
+      log.info(
+        `cold thread ${m.thread_ts} → buffer + resurrect ${sessionId.slice(0, 8)}`,
+      );
+      attemptResurrect(config, sessionId).catch((err: unknown) => {
+        log.warn(
+          `resurrect ${sessionId.slice(0, 8)} failed: ${(err as Error).message}`,
+        );
+      });
+      return;
+    }
+    // First candidate is the preferred one (most recent live activity);
+    // fall back to others if the prompt fails (e.g. when multiple
+    // proxies share the Claude Code session DB but only one has the
+    // session in memory). The succeeding candidate gets promoted in
+    // the registry below so future routes prefer it.
+    const entry = candidates[0]!;
+    if (text.startsWith("!debug")) {
+      const info = entry.bridge.debugInfo(entry.sessionId);
+      await app.client.chat.postMessage({
+        channel: m.channel,
+        thread_ts: m.thread_ts,
+        text: "```\n" + info + "\n```",
+      });
+      return;
     }
     let routed = false;
     let lastError: string | undefined;
@@ -311,7 +333,10 @@ async function handleSpawn(
     return;
   }
   if (args.prompt) {
-    setPendingInitialPrompt(result.sessionId, args.prompt);
+    bufferPendingMessage(result.sessionId, {
+      text: args.prompt,
+      images: [],
+    });
   }
   await app.client.reactions
     .add({ channel, timestamp: ts, name: "white_check_mark" })

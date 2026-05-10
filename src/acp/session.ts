@@ -10,6 +10,7 @@ import {
 } from "../formatters/tool-call.js";
 import type { ReactionAction } from "../slack/reaction-map.js";
 import { threadRegistry } from "../slack/registry.js";
+import type { PendingMessage } from "../slack/resurrect.js";
 import { ChannelMap } from "../storage/channels.js";
 import { HiddenStore } from "../storage/hidden.js";
 import { TruncatedStore, fullExpand, truncate } from "../storage/truncated.js";
@@ -171,9 +172,12 @@ export interface SessionBridgeOptions {
     title: string | undefined;
     agentId: string | undefined;
   };
-  // First prompt to send once attach completes. Used by !spawn so the
-  // user can spawn-and-prompt in a single Slack message.
-  initialPrompt?: string | undefined;
+  // Messages buffered while the bridge wasn't yet up — typed in slack
+  // against a cold thread (resurrection path) or queued by !spawn for
+  // a session whose bridge hadn't booted yet. Forwarded to the agent
+  // in order via sendUserPrompt as soon as the bridge attach opens
+  // and the slack thread is ready.
+  initialMessages?: ReadonlyArray<PendingMessage>;
 }
 
 // One SessionBridge per hydra session. The discovery layer
@@ -249,12 +253,12 @@ export class SessionBridge {
       const sessionId = this.opts.sessionMeta.sessionId;
       void this.ensureSession(sessionId, {})
         .then(async () => {
-          if (this.opts.initialPrompt) {
+          for (const msg of this.opts.initialMessages ?? []) {
             try {
-              await this.sendUserPrompt(sessionId, this.opts.initialPrompt);
+              await this.sendUserPrompt(sessionId, msg.text, msg.images);
             } catch (err) {
               log.warn(
-                `initial prompt failed for ${sessionId.slice(0, 8)}: ${(err as Error).message}`,
+                `buffered prompt failed for ${sessionId.slice(0, 8)}: ${(err as Error).message}`,
               );
             }
           }
@@ -533,7 +537,6 @@ export class SessionBridge {
         await this.flushAgentMessage(session);
         this.closeAgentMessage(session);
         await this.finalizeSpinner(session, stopReason);
-        await this.postReadyMarker(session, stopReason);
         break;
       }
       case "tool_call":
@@ -819,36 +822,6 @@ export class SessionBridge {
     }
   }
 
-  // Post a "ready" line at the very bottom of the thread on a clean
-  // turn end. The in-place spinner marker (finalizeSpinner) sits up
-  // wherever the spinner originally posted — usually well above the
-  // latest agent prose for any turn that talked a lot — which makes
-  // it hard to tell from a glance that the agent is actually done.
-  // A fresh message at the bottom gives an unambiguous "your turn"
-  // signal. Skipped for non-success stop reasons (cancelled / refusal
-  // / max_tokens / etc.) — the in-place marker already labels those
-  // clearly with their own icon, and a "Ready" below would feel wrong.
-  private async postReadyMarker(
-    session: SessionState,
-    stopReason: string | undefined,
-  ): Promise<void> {
-    if (stopReason && stopReason !== "end_turn") {
-      return;
-    }
-    if (!session.threadTs) {
-      return;
-    }
-    await this.opts.thread
-      .postMessage({
-        channel: session.channel,
-        threadTs: session.threadTs,
-        text: ":white_check_mark: *Ready*",
-      })
-      .catch((err: unknown) => {
-        log.warn(`ready marker post failed: ${(err as Error).message}`);
-      });
-  }
-
   // Post the per-turn spinner if it isn't up yet. Called from the
   // earliest indicators of agent activity (agent_thought_chunk,
   // agent_message_chunk) so the spinner appears as soon as the turn
@@ -996,11 +969,8 @@ export class SessionBridge {
     const elapsed = session.spinnerStartedAt
       ? Date.now() - session.spinnerStartedAt
       : 0;
-    const elapsedSuffix = elapsed > 0 ? ` (${formatElapsed(elapsed)})` : "";
-    const head = renderFinalMarker(count, elapsedSuffix, stopReason);
-    const text = expanded
-      ? renderSpinnerExpanded(session, head)
-      : head;
+    const head = renderReadyMarker(count, elapsed, stopReason);
+    const text = expanded ? renderSpinnerExpanded(session, head) : head;
     session.spinnerTs = undefined;
     session.spinnerExpanded = false;
     session.turnToolCallIds = [];
@@ -1013,10 +983,28 @@ export class SessionBridge {
     for (const resolve of listeners) {
       resolve();
     }
-    if (!ts) {
+    // Delete the in-progress spinner (where it originally posted, mid-turn)
+    // and post a fresh "Ready" marker at the bottom of the thread. One
+    // turn-boundary message instead of two — and the bottom marker is the
+    // unambiguous "your turn" signal regardless of whether the turn
+    // produced agent prose, tools, or both.
+    if (ts) {
+      await this.opts.thread
+        .deleteMessage(session.channel, ts)
+        .catch(() => undefined);
+    }
+    if (!session.threadTs) {
       return;
     }
-    await this.opts.thread.updateMessage(session.channel, ts, text);
+    await this.opts.thread
+      .postMessage({
+        channel: session.channel,
+        threadTs: session.threadTs,
+        text,
+      })
+      .catch((err: unknown) => {
+        log.warn(`ready marker post failed: ${(err as Error).message}`);
+      });
   }
 
   private async ensureSession(
@@ -1601,17 +1589,23 @@ export class SessionBridge {
     });
     // When we are the originator, hydra excludes us from the
     // synthesized turn_complete broadcast. The session/prompt response
-    // is the turn-end signal for this side, so finalize the agent
-    // message here — otherwise the next turn's chunks would
-    // chat.update into this turn's still-open message.
+    // is the turn-end signal for this side. Run the cleanup tail on
+    // notificationChain so any subsequent session/update events for
+    // the *next* turn (which hydra dequeues immediately after our
+    // response) wait behind our finalizeSpinner — without this, the
+    // next turn's first agent_message_chunk hits ensureSpinner with
+    // spinnerTs still set to our spinner and silently no-ops.
     const stopReason = response?.stopReason;
     log.info(
       `own-turn end ${sessionId.slice(0, 8)}${stopReason ? ` (${stopReason})` : ""}`,
     );
-    await this.flushAgentMessage(session);
-    this.closeAgentMessage(session);
-    await this.finalizeSpinner(session, stopReason);
-    await this.postReadyMarker(session, stopReason);
+    const tail = this.notificationChain.then(async () => {
+      await this.flushAgentMessage(session);
+      this.closeAgentMessage(session);
+      await this.finalizeSpinner(session, stopReason);
+    });
+    this.notificationChain = tail.catch(() => undefined);
+    await tail;
   }
 
   // Permission reaction → session/request_permission response. Takes
@@ -2110,30 +2104,38 @@ function formatTranscriptMarkdown(opts: {
 // explicit "cancelled" indicator so a user-interrupted turn doesn't
 // look like a normal completion; other non-success reasons (refusal,
 // max_tokens, etc.) use a warning icon and include the reason text.
-function renderFinalMarker(
+// Final per-turn marker, posted at the bottom of the thread once the
+// agent goes idle. Replaces both the in-place "✓ done" spinner finalize
+// and the separate Ready post — see finalizeSpinnerWork. Combines the
+// stop-reason icon with the turn's stats into one line.
+function renderReadyMarker(
   count: number,
-  elapsedSuffix: string,
+  elapsedMs: number,
   stopReason: string | undefined,
 ): string {
+  let icon: string;
+  let label: string;
   if (stopReason === "cancelled") {
-    const body =
-      count > 0
-        ? `cancelled · ${count} tool${count === 1 ? "" : "s"}${elapsedSuffix}`
-        : `cancelled${elapsedSuffix}`;
-    return `:no_entry: _${body}_`;
+    icon = ":no_entry:";
+    label = "cancelled";
+  } else if (stopReason && stopReason !== "end_turn") {
+    icon = ":warning:";
+    label = stopReason;
+  } else {
+    icon = ":white_check_mark:";
+    label = "Ready";
   }
-  if (stopReason && stopReason !== "end_turn") {
-    const body =
-      count > 0
-        ? `${stopReason} · ${count} tool${count === 1 ? "" : "s"}${elapsedSuffix}`
-        : `${stopReason}${elapsedSuffix}`;
-    return `:warning: _${body}_`;
+  const stats: string[] = [];
+  if (count > 0) {
+    stats.push(`${count} tool${count === 1 ? "" : "s"}`);
   }
-  const body =
-    count > 0
-      ? `${count} tool${count === 1 ? "" : "s"}${elapsedSuffix}`
-      : `done${elapsedSuffix}`;
-  return `:white_check_mark: _${body}_`;
+  if (elapsedMs > 0) {
+    stats.push(formatElapsed(elapsedMs));
+  }
+  if (stats.length === 0) {
+    return `${icon} *${label}*`;
+  }
+  return `${icon} *${label}* _· ${stats.join(" · ")}_`;
 }
 
 // Trim a prompt for inline display in a queue/processing indicator so
