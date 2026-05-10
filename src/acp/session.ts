@@ -439,6 +439,27 @@ export class SessionBridge {
         }
         break;
       }
+      case "prompt_received": {
+        // Synthesized by hydra (per RFD #533) when ANOTHER client sends
+        // session/prompt to this session. Spec excludes the originator,
+        // so receiving this means a sibling frontend (e.g. agent-shell)
+        // typed the prompt and we should mirror it into Slack as a user
+        // message — same UX as the old user_message_chunk path. Extract
+        // text from the prompt content blocks; non-text blocks (images,
+        // etc.) are dropped for now (Slack can't render them inline
+        // anyway without an upload, which is out of scope for the mirror).
+        const blocks = (update.prompt ?? []) as Array<Record<string, unknown>>;
+        const text = blocks
+          .filter((b) => b.type === "text" && typeof b.text === "string")
+          .map((b) => b.text as string)
+          .join("");
+        if (text.length > 0) {
+          await this.flushAgentMessage(session);
+          this.closeAgentMessage(session);
+          session.userChunks.push(text);
+        }
+        break;
+      }
       case "turn_complete": {
         // Synthesized by hydra when the agent's session/prompt response
         // arrives. Finalize any open streaming agent message so the
