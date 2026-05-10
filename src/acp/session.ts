@@ -253,6 +253,9 @@ export class SessionBridge {
       const sessionId = this.opts.sessionMeta.sessionId;
       void this.ensureSession(sessionId, {})
         .then(async () => {
+          // Pick up any editor-supplied title (set at session/new via
+          // _meta.acp-hydra.name) the moment we attach.
+          void this.refreshTitleFromHydra(sessionId).catch(() => undefined);
           for (const msg of this.opts.initialMessages ?? []) {
             try {
               await this.sendUserPrompt(sessionId, msg.text, msg.images);
@@ -516,6 +519,7 @@ export class SessionBridge {
           `prompt_received ${sessionId.slice(0, 8)} text=${text.slice(0, 80)} blocks=${blocks.length}`,
         );
         if (text.length > 0) {
+          this.seedTitleFromPrompt(sessionId, text);
           await this.flushAgentMessage(session);
           this.closeAgentMessage(session);
           session.userChunks.push(text);
@@ -537,6 +541,10 @@ export class SessionBridge {
         await this.flushAgentMessage(session);
         this.closeAgentMessage(session);
         await this.finalizeSpinner(session, stopReason);
+        // Pull the latest title from hydra now that a turn boundary has
+        // landed — covers agents that update _meta.acp-hydra.name during
+        // the session (rare today, future-proof).
+        void this.refreshTitleFromHydra(sessionId).catch(() => undefined);
         break;
       }
       case "tool_call":
@@ -1176,6 +1184,50 @@ export class SessionBridge {
     );
   }
 
+  // Seed the session title with the first user prompt's first line,
+  // matching agent-shell's behavior: gives the slack thread a useful
+  // header before any agent-supplied title arrives, but never overwrites
+  // a non-empty existing title (e.g. an editor-supplied name passed via
+  // _meta.acp-hydra.name at session/new).
+  private seedTitleFromPrompt(sessionId: string, text: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.title) {
+      return;
+    }
+    const seed = firstLine(text, 100);
+    if (!seed) {
+      return;
+    }
+    void this.applyTitle(sessionId, seed).catch(() => undefined);
+  }
+
+  // Pull the canonical title from hydra's session/list view. Hydra's
+  // record only changes at session/new (it stores _meta.acp-hydra.name);
+  // polling here picks up the editor-supplied name without us having to
+  // route HydraDiscovery's session list through every notification.
+  // Empty/missing titles never overwrite a locally-seeded title.
+  private async refreshTitleFromHydra(sessionId: string): Promise<void> {
+    let result: { sessions?: Array<Record<string, unknown>> };
+    try {
+      result = await this.opts.attach.request<{
+        sessions?: Array<Record<string, unknown>>;
+      }>("session/list", {});
+    } catch (err) {
+      log.debug(
+        `session/list failed for ${sessionId.slice(0, 8)}: ${(err as Error).message}`,
+      );
+      return;
+    }
+    const match = (result.sessions ?? []).find(
+      (s) => s.sessionId === sessionId,
+    );
+    const title = typeof match?.title === "string" ? match.title : undefined;
+    if (!title) {
+      return;
+    }
+    await this.applyTitle(sessionId, title).catch(() => undefined);
+  }
+
   // Push the agent's accumulated text to Slack. First flush of a new
   // agent message posts; subsequent flushes update the same message in
   // place, so a single agent burst stays as one live Slack message even
@@ -1390,6 +1442,9 @@ export class SessionBridge {
       log.warn(`sendUserPrompt for unknown session ${sessionId}`);
       return;
     }
+    if (text) {
+      this.seedTitleFromPrompt(sessionId, text);
+    }
     // wasQueued covers both "another Slack prompt is ahead of us" and
     // "the agent is currently mid-turn on something else (e.g. a prompt
     // from another attached frontend)". For the latter, agents generally
@@ -1603,6 +1658,7 @@ export class SessionBridge {
       await this.flushAgentMessage(session);
       this.closeAgentMessage(session);
       await this.finalizeSpinner(session, stopReason);
+      void this.refreshTitleFromHydra(sessionId).catch(() => undefined);
     });
     this.notificationChain = tail.catch(() => undefined);
     await tail;
@@ -2146,6 +2202,20 @@ function formatPromptPreview(text: string): string {
     return trimmed;
   }
   return `${trimmed.slice(0, 200)}…`;
+}
+
+// First non-empty line of `text`, truncated to `max` chars with ellipsis
+// if needed. Returns undefined if the prompt is all whitespace. Used to
+// seed a session's slack-thread title from the user's first prompt.
+function firstLine(text: string, max: number): string | undefined {
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) {
+      continue;
+    }
+    return line.length > max ? `${line.slice(0, max)}…` : line;
+  }
+  return undefined;
 }
 
 // Compact human-readable elapsed-time formatter.
