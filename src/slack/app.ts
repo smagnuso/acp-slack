@@ -164,11 +164,15 @@ export function createSlackApp(config: Config): SlackApp {
       item: { channel?: string; ts?: string };
     };
     if (config.authorizedUsers.size > 0 && !config.authorizedUsers.has(e.user)) {
+      log.info(`reaction drop: unauthorized user ${e.user} :${e.reaction}:`);
       return;
     }
     const channel = e.item.channel;
     const ts = e.item.ts;
     if (!channel || !ts) {
+      log.info(
+        `reaction drop: missing channel/ts :${e.reaction}: channel=${channel ?? "(none)"} ts=${ts ?? "(none)"}`,
+      );
       return;
     }
     const action = reactionAction(e.reaction);
@@ -185,12 +189,17 @@ export function createSlackApp(config: Config): SlackApp {
     }
     // Reactions can target either the thread parent (root ts) or any
     // message inside the thread. Look up by both forms.
-    const entry =
-      threadRegistry.lookup(channel, ts) ??
-      (await tryLookupByMessage(app, channel, ts));
+    const directEntry = threadRegistry.lookup(channel, ts);
+    const entry = directEntry ?? (await tryLookupByMessage(app, channel, ts));
     if (!entry) {
+      log.info(
+        `reaction drop: no bridge for ${channel}/${ts} (direct=${!!directEntry}) :${e.reaction}:→${action}`,
+      );
       return;
     }
+    log.info(
+      `reaction route: :${e.reaction}:→${action} ${channel}/${ts} session=${entry.sessionId.slice(0, 8)} (direct=${!!directEntry})`,
+    );
     try {
       await entry.bridge.handleReaction(entry.sessionId, channel, ts, action, true);
     } catch (err) {

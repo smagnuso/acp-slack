@@ -185,6 +185,9 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
 
   reply(id: JsonRpcId, result: unknown): void {
     const msg: JsonRpcResponse = { jsonrpc: "2.0", id, result };
+    log.info(
+      `reply id=${typeof id}:${String(id)} result=${JSON.stringify(result).slice(0, 200)}`,
+    );
     this.write(msg);
   }
 
@@ -194,6 +197,9 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
       id,
       error: { code, message },
     };
+    log.info(
+      `replyError id=${typeof id}:${String(id)} code=${code} message=${message}`,
+    );
     this.write(msg);
   }
 

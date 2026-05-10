@@ -84,15 +84,14 @@ interface SessionState {
   // is removed in the chain's finally regardless of how the prompt
   // resolved (run, cancelled, errored).
   queuedPrompts: QueuedPromptEntry[];
-  // When a prompt's chain.then fires while the agent is still busy
-  // on an earlier turn (its spinner is up), we defer the queued →
-  // processing indicator transition rather than flipping it
-  // immediately. The next time refreshSpinnerWork posts a fresh
-  // spinner — which happens when the agent has finalized the prior
-  // turn and started ours — we transition this entry's indicator at
-  // that moment. Cleared after transition or when sendUserPromptWork
-  // returns (whichever comes first).
-  pendingProcessingEntry: QueuedPromptEntry | undefined;
+  // Resolvers for any sendUserPrompt awaiting the agent to go idle
+  // (spinnerTs becoming undefined). Drained in finalizeSpinnerWork so
+  // queued slack-side prompts can fire their session/prompt only when
+  // the agent's prior turn has actually completed — keeps prompts out
+  // of hydra's per-session FIFO until they're truly our turn, so
+  // :stop_sign: on the queue indicator can splice them out before any
+  // wire frame goes upstream.
+  idleListeners: Array<() => void>;
   // Streaming user message from another frontend attached to the same
   // session (e.g. the editor's stdio shim). Same flush model as agent.
   userChunks: string[];
@@ -676,10 +675,16 @@ export class SessionBridge {
       // Still pending — fill in the ts so reactions and resolution
       // notifications can tear down the message later.
       entry.promptTs = promptTs;
+      log.info(
+        `permission posted requestId=${typeof r.id}:${key} session=${sessionId.slice(0, 8)} promptTs=${promptTs ?? "(none)"} promptChannel=${session.channel}`,
+      );
     } else if (promptTs) {
       // Resolved while we were posting. The notification handler
       // couldn't delete because we hadn't told it the ts yet — clean
       // up the now-orphaned message ourselves.
+      log.info(
+        `permission posted-but-already-resolved requestId=${typeof r.id}:${key}; deleting orphan ${session.channel}/${promptTs}`,
+      );
       await this.opts.thread
         .deleteMessage(session.channel, promptTs)
         .catch(() => undefined);
@@ -811,18 +816,6 @@ export class SessionBridge {
       session.spinnerTs = r.ts;
       session.spinnerStartedAt = Date.now();
       this.startSpinnerTicker(session);
-      // A fresh spinner means the agent has actually started a new
-      // turn — the truthful moment for any deferred queue indicator
-      // to flip from "queued" to "processing".
-      const pending = session.pendingProcessingEntry;
-      if (pending?.promptTs) {
-        session.pendingProcessingEntry = undefined;
-        void this.markQueueIndicatorProcessing(
-          session,
-          pending.promptTs,
-          pending.text,
-        ).catch(() => undefined);
-      }
     }
   }
 
@@ -910,6 +903,12 @@ export class SessionBridge {
   cleanup(): void {
     for (const session of this.sessions.values()) {
       this.stopSpinnerTicker(session);
+      // Wake any sendUserPrompt waiters so their chains can resolve
+      // (cancelled or sent) instead of hanging the bridge process.
+      const listeners = session.idleListeners.splice(0);
+      for (const resolve of listeners) {
+        resolve();
+      }
     }
   }
 
@@ -1007,6 +1006,13 @@ export class SessionBridge {
     session.turnToolCallIds = [];
     session.spinnerStartedAt = undefined;
     session.planTs = undefined;
+    // Wake any sendUserPrompt awaiting a turn boundary. Drained here
+    // so the next slack-side prompt can fire its session/prompt
+    // exactly when the agent goes idle, not before.
+    const listeners = session.idleListeners.splice(0);
+    for (const resolve of listeners) {
+      resolve();
+    }
     if (!ts) {
       return;
     }
@@ -1102,7 +1108,7 @@ export class SessionBridge {
       promptChain: undefined,
       queuedPromptCount: 0,
       queuedPrompts: [],
-      pendingProcessingEntry: undefined,
+      idleListeners: [],
       userChunks: [],
       title: undefined,
       cwd,
@@ -1443,40 +1449,31 @@ export class SessionBridge {
       .then(async () => {
         try {
           if (queuedEntry?.cancelled) {
-            // User cancelled this prompt while it was still queued —
-            // skip the work entirely. The queue indicator was already
-            // updated by the cancel handler.
+            // Cancelled while waiting in our chain. Indicator already
+            // updated by the cancel handler; nothing to send upstream.
+            return;
+          }
+          // Hold here until the agent's prior turn finishes (spinner
+          // gone). This keeps our prompt out of hydra's per-session
+          // FIFO so :stop_sign: on the queue indicator can splice it
+          // out without sending a session/cancel.
+          await this.waitForIdle(session);
+          if (queuedEntry?.cancelled) {
             return;
           }
           if (queuedEntry) {
             queuedEntry.started = true;
-            // Transition the indicator only if the agent is currently
-            // idle on this session (no spinner up). If a spinner is
-            // up, the agent is finishing a prior turn first — defer
-            // the transition until refreshSpinnerWork posts the next
-            // spinner (i.e. the agent picked up our prompt). Without
-            // this, "processing" appears the moment our chain runs
-            // but well before the agent actually starts on us.
-            if (!session.spinnerTs) {
-              const ts = await queueTsPromise;
-              if (ts) {
-                await this.markQueueIndicatorProcessing(
-                  session,
-                  ts,
-                  text,
-                ).catch(() => undefined);
-              }
-            } else {
-              await queueTsPromise;
-              session.pendingProcessingEntry = queuedEntry;
+            const ts = await queueTsPromise;
+            if (ts) {
+              await this.markQueueIndicatorProcessing(
+                session,
+                ts,
+                text,
+              ).catch(() => undefined);
             }
           }
           await this.sendUserPromptWork(session, text, images);
         } finally {
-          // Cancelled-while-queued entries already had their count
-          // dropped at cancel time so subsequent prompts saw an
-          // accurate "ahead" depth. Skip the decrement here to avoid
-          // double-counting.
           if (!queuedEntry?.cancelled) {
             session.queuedPromptCount = Math.max(
               0,
@@ -1488,18 +1485,23 @@ export class SessionBridge {
             if (idx >= 0) {
               session.queuedPrompts.splice(idx, 1);
             }
-            // If this entry was deferred for transition but never got
-            // there (e.g. the agent never emitted notifications for
-            // our prompt), clear the slot so it can't bleed into a
-            // future turn's spinner-post hook.
-            if (session.pendingProcessingEntry === queuedEntry) {
-              session.pendingProcessingEntry = undefined;
-            }
           }
         }
       });
     session.promptChain = next;
     return next;
+  }
+
+  // Resolves when the agent has no spinner up (i.e. is between turns).
+  // Resolves immediately if already idle. Otherwise queues a callback
+  // that finalizeSpinnerWork drains when it clears spinnerTs.
+  private async waitForIdle(session: SessionState): Promise<void> {
+    if (!session.spinnerTs) {
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      session.idleListeners.push(resolve);
+    });
   }
 
   // Slack-side feedback for a Slack-originated prompt that has to wait
@@ -1644,6 +1646,9 @@ export class SessionBridge {
   ): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
+      log.info(
+        `handleReaction drop: no SessionState for ${sessionId.slice(0, 8)} action=${action}; have=${[...this.sessions.keys()].map((k) => k.slice(0, 8)).join(",") || "(none)"}`,
+      );
       return;
     }
     switch (action) {
@@ -1761,8 +1766,18 @@ export class SessionBridge {
       }
     }
     if (!pending) {
+      const open = Array.from(this.permissionResolvers.values()).map(
+        (e) =>
+          `requestId=${String(e.requestId)} session=${e.sessionId.slice(0, 8)} promptTs=${e.promptTs ?? "(none)"} promptChannel=${e.promptChannel ?? "(none)"}`,
+      );
+      log.info(
+        `permission ${action} miss: no resolver matches ${channel}/${ts}; open=[${open.join(" | ") || "(none)"}]`,
+      );
       return;
     }
+    log.info(
+      `permission ${action} match: requestId=${String(pending.requestId)} session=${pending.sessionId.slice(0, 8)} ts=${ts}`,
+    );
     // Map the reaction to a kind ordering. The first option whose kind
     // matches in priority order wins; if nothing matches we fall back to
     // the agent's first option (some agents don't tag option kinds).
