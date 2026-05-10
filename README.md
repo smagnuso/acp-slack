@@ -1,6 +1,6 @@
-# acp-hydra-slack
+# hydra-acp-slack
 
-Bridges every active [acp-hydra](https://github.com/smagnuso/acp-hydra)
+Bridges every active [hydra-acp](https://github.com/smagnuso/hydra-acp)
 session to a Slack thread, so any ACP agent (Claude Code, Codex, Gemini,
 etc.) running through hydra shows up in Slack:
 
@@ -18,12 +18,12 @@ REST API for active sessions, and attaches over WSS to each one.
 
 ```
                  hydra REST  +-------------+        Slack
-       /v1/sessions   <----  |  acp-hydra-slack  |  ---->  Web API
+       /v1/sessions   <----  |  hydra-acp-slack  |  ---->  Web API
                              |   daemon    |  <----  Socket Mode WS
        hydra WSS      <----> |             |
        /acp                  +-------------+
                                     |
-                            ~/.acp-hydra-slack/
+                            ~/.hydra-acp-slack/
                               hidden/     (hidden originals)
                               truncated/  (full output cache)
                               channels.json  (cwd → channel map)
@@ -46,7 +46,7 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
    - Subscribe to events: `message.channels`, `message.groups`,
      `message.im`, `reaction_added`, `reaction_removed`.
    - Install the app to your workspace and grab the bot token (`xoxb-...`).
-2. **Config file.** Place credentials at `~/.acp-hydra-slack.conf`:
+2. **Config file.** Place credentials at `~/.hydra-acp-slack.conf`:
 
    ```
    SLACK_BOT_TOKEN=xoxb-...
@@ -56,8 +56,8 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
    AUTHORIZED_USERS=U12345678,U23456789
    PER_PROJECT_CHANNELS=true
    SHOW_TOOL_OUTPUT=false
-   HIDDEN_MESSAGES_DIR=~/.acp-hydra-slack/hidden
-   TRUNCATED_MESSAGES_DIR=~/.acp-hydra-slack/truncated
+   HIDDEN_MESSAGES_DIR=~/.hydra-acp-slack/hidden
+   TRUNCATED_MESSAGES_DIR=~/.hydra-acp-slack/truncated
    TODO_DIRECTORY=~/org/todo
    WEBSOCKET_STALE_THRESHOLD=7200
    DEBUG=false
@@ -68,16 +68,16 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
    From npm (recommended once published):
 
    ```sh
-   npm install -g @acp-hydra/slack
+   npm install -g @hydra-acp/slack
    ```
 
-   This drops an `acp-hydra-slack` binary on your PATH.
+   This drops an `hydra-acp-slack` binary on your PATH.
 
    Or from source:
 
    ```sh
-   git clone https://github.com/smagnuson/acp-hydra-slack.git ~/dev/acp-hydra-slack
-   cd ~/dev/acp-hydra-slack
+   git clone https://github.com/smagnuso/hydra-acp-slack.git ~/dev/hydra-acp-slack
+   cd ~/dev/hydra-acp-slack
    npm install
    npm run build
    ```
@@ -86,40 +86,40 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
    with hydra. If installed via npm:
 
    ```sh
-   acp-hydra extensions add acp-hydra-slack --command acp-hydra-slack
+   hydra-acp extensions add hydra-acp-slack --command hydra-acp-slack
    ```
 
    Or pointed at a local build:
 
    ```sh
-   acp-hydra extensions add acp-hydra-slack \
+   hydra-acp extensions add hydra-acp-slack \
      --command node \
-     --args ~/dev/acp-hydra-slack/dist/index.js
+     --args ~/dev/hydra-acp-slack/dist/index.js
    ```
 
-   That writes the equivalent entry into `~/.acp-hydra/config.json`:
+   That writes the equivalent entry into `~/.hydra-acp/config.json`:
 
    ```json
    {
      "extensions": {
-       "acp-hydra-slack": {
+       "hydra-acp-slack": {
          "command": ["node"],
-         "args": ["/home/you/dev/acp-hydra-slack/dist/index.js"],
+         "args": ["/home/you/dev/hydra-acp-slack/dist/index.js"],
          "enabled": true
        }
      }
    }
    ```
 
-   On `acp-hydra daemon start`, hydra spawns acp-hydra-slack with these env
-   vars set: `ACP_HYDRA_DAEMON_URL`, `ACP_HYDRA_TOKEN`, `ACP_HYDRA_WS_URL`.
-   acp-hydra-slack uses them to discover and attach to sessions. Stdout/stderr
-   land in `~/.acp-hydra/extensions/acp-hydra-slack.log`. Lifecycle is managed
-   with `acp-hydra extensions start|stop|restart acp-hydra-slack` and
-   `acp-hydra extensions logs acp-hydra-slack -f` to tail.
+   On `hydra-acp daemon start`, hydra spawns hydra-acp-slack with these env
+   vars set: `HYDRA_ACP_DAEMON_URL`, `HYDRA_ACP_TOKEN`, `HYDRA_ACP_WS_URL`.
+   hydra-acp-slack uses them to discover and attach to sessions. Stdout/stderr
+   land in `~/.hydra-acp/extensions/hydra-acp-slack.log`. Lifecycle is managed
+   with `hydra-acp extensions start|stop|restart hydra-acp-slack` and
+   `hydra-acp extensions logs hydra-acp-slack -f` to tail.
 
 5. **Run standalone (alternative).** Set `HYDRA_DAEMON_URL` and
-   `HYDRA_TOKEN` in `~/.acp-hydra-slack.conf` (or export them as env
+   `HYDRA_TOKEN` in `~/.hydra-acp-slack.conf` (or export them as env
    vars), then:
 
    ```sh
@@ -139,11 +139,11 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
 | `AUTHORIZED_USERS`          | empty                              | Comma-separated Slack user IDs. Empty = inbound disabled. |
 | `PER_PROJECT_CHANNELS`      | `true`                             | Look up channel per session cwd in the channel map. |
 | `CHANNEL_PREFIX`            | empty                              | Reserved for auto-create flows; unused for now. |
-| `CHANNELS_FILE`             | `~/.acp-hydra-slack/channels.json` | JSON map of cwd → channel ID. |
+| `CHANNELS_FILE`             | `~/.hydra-acp-slack/channels.json` | JSON map of cwd → channel ID. |
 | `SHOW_TOOL_OUTPUT`          | `false`                            | If true, include tool body inline (still truncated). |
 | `UPLOAD_TRANSCRIPT_ON_END`  | `true`                             | When the hydra session closes, upload the thread's contents as a markdown file attached to the same thread. Set to `false` to disable. |
-| `HIDDEN_MESSAGES_DIR`       | `~/.acp-hydra-slack/hidden`        | Where 🙈-hidden message originals go. |
-| `TRUNCATED_MESSAGES_DIR`    | `~/.acp-hydra-slack/truncated`     | Where full tool outputs cache for 📖 expand. |
+| `HIDDEN_MESSAGES_DIR`       | `~/.hydra-acp-slack/hidden`        | Where 🙈-hidden message originals go. |
+| `TRUNCATED_MESSAGES_DIR`    | `~/.hydra-acp-slack/truncated`     | Where full tool outputs cache for 📖 expand. |
 | `TODO_DIRECTORY`            | `~/org/todo`                       | Where bookmark reactions write TODO files. |
 | `WEBSOCKET_STALE_THRESHOLD` | `30`                               | Seconds of continuously-disconnected Slack Socket Mode WS before the bridge `process.exit(1)`s. Hydra's extension manager respawns it ~1s later with a fresh DNS cache + HTTP client; the existing process gets stuck in a reconnect loop after a network flap (VPN drop, etc.). |
 | `BACKFILL_HISTORY`          | `false`                            | If true, replay hydra's cached history into Slack on attach. Off by default — replays trip Slack rate limits and create noise. |
@@ -176,7 +176,7 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
 |----------------------------------|------------------|--------|
 | `!debug`                         | inside a thread  | Replies with the session's debug info (sessionId, channel, ws state, last-frame time). |
 | `!agents`                        | anywhere         | Lists agents installed in hydra's registry (`GET /v1/agents`). |
-| `!session [agent] [cwd] [prompt…]` | anywhere         | Asks hydra to create a fresh ACP session (`POST /v1/sessions`). Both positionals are optional — hydra falls back to `defaultAgent` and `defaultCwd` from `~/.acp-hydra/config.json` (which itself defaults to `claude-code` and `~`). |
+| `!session [agent] [cwd] [prompt…]` | anywhere         | Asks hydra to create a fresh ACP session (`POST /v1/sessions`). Both positionals are optional — hydra falls back to `defaultAgent` and `defaultCwd` from `~/.hydra-acp/config.json` (which itself defaults to `claude-code` and `~`). |
 | `!title [text]`                  | inside a thread  | Shortcut for hydra's `/hydra title` slash command. With an argument, sets the session title directly; without one, asks the agent to retitle. |
 
 `!session` parsing rules:

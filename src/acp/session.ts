@@ -406,7 +406,7 @@ export class SessionBridge {
       this.opts.attach.replyError(
         r.id,
         -32601,
-        "fs/* not supported by acp-hydra-slack secondary",
+        "fs/* not supported by hydra-acp-slack secondary",
       );
       return;
     }
@@ -475,7 +475,7 @@ export class SessionBridge {
         // prompt_received arm below, so drop the compat copy to avoid
         // double-rendering.
         const meta = (update._meta ?? {}) as Record<string, unknown>;
-        const hydraMeta = (meta["acp-hydra"] ?? {}) as Record<string, unknown>;
+        const hydraMeta = (meta["hydra"] ?? {}) as Record<string, unknown>;
         if (hydraMeta.compatFor === "prompt_received") {
           break;
         }
@@ -1966,7 +1966,7 @@ export class SessionBridge {
 //
 // Layout below the title (each line omitted when the inputs aren't known):
 //   1. cwd path with the daemon's hostname appended ("_/path_ on `host`")
-//      — disambiguates threads when running multiple acp-hydra-slack daemons
+//      — disambiguates threads when running multiple hydra-acp-slack daemons
 //      against the same Slack workspace.
 //   2. Agent / model / mode / usage stats on one packed line, with
 //      identifiers wrapped in backticks for monospace contrast (Slack

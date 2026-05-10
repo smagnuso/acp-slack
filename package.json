@@ -1,20 +1,20 @@
 {
-  "name": "@acp-hydra/slack",
+  "name": "@hydra-acp/slack",
   "version": "0.1.0",
-  "description": "Bridge acp-hydra sessions to Slack threads.",
+  "description": "Bridge hydra-acp sessions to Slack threads.",
   "license": "MIT",
   "type": "module",
-  "homepage": "https://github.com/smagnuson/acp-hydra-slack#readme",
+  "homepage": "https://github.com/smagnuso/hydra-acp-slack#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/smagnuson/acp-hydra-slack.git"
+    "url": "git+https://github.com/smagnuso/hydra-acp-slack.git"
   },
   "bugs": {
-    "url": "https://github.com/smagnuson/acp-hydra-slack/issues"
+    "url": "https://github.com/smagnuso/hydra-acp-slack/issues"
   },
   "keywords": [
     "acp",
-    "acp-hydra",
+    "hydra-acp",
     "slack",
     "bolt",
     "agent-client-protocol",
@@ -32,7 +32,7 @@
   ],
   "main": "dist/index.js",
   "bin": {
-    "acp-hydra-slack": "dist/index.js"
+    "hydra-acp-slack": "dist/index.js"
   },
   "scripts": {
     "build": "tsc -p .",

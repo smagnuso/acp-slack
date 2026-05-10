@@ -18,8 +18,8 @@ export interface Config {
   websocketStaleThreshold: number;
   imageUploadRateLimit: number;
   imageUploadRateWindow: number;
-  // Hydra daemon URL/token. Sourced from ACP_HYDRA_DAEMON_URL and
-  // ACP_HYDRA_TOKEN env vars (set by hydra when it spawns this extension)
+  // Hydra daemon URL/token. Sourced from HYDRA_ACP_DAEMON_URL and
+  // HYDRA_ACP_TOKEN env vars (set by hydra when it spawns this extension)
   // or, as a fallback, from the config file under HYDRA_DAEMON_URL /
   // HYDRA_TOKEN.
   hydraDaemonUrl: string;
@@ -38,7 +38,7 @@ export interface Config {
   debug: boolean;
 }
 
-const DEFAULT_CONF_PATH = resolve(homedir(), ".acp-hydra-slack.conf");
+const DEFAULT_CONF_PATH = resolve(homedir(), ".hydra-acp-slack.conf");
 
 const TRUTHY = new Set(["1", "true", "yes", "on", "t"]);
 
@@ -120,7 +120,7 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
   } catch (err) {
     throw new Error(
       `Cannot read config at ${path}: ${(err as Error).message}. ` +
-        `Set ACP_HYDRA_SLACK_CONF env var to override.`,
+        `Set HYDRA_ACP_SLACK_CONF env var to override.`,
     );
   }
   const map = parseEnvFile(text);
@@ -135,18 +135,18 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
   }
 
   const hydraDaemonUrl =
-    process.env.ACP_HYDRA_DAEMON_URL ??
+    process.env.HYDRA_ACP_DAEMON_URL ??
     map.get("HYDRA_DAEMON_URL") ??
     "http://127.0.0.1:8765";
   const hydraToken =
-    process.env.ACP_HYDRA_TOKEN ?? map.get("HYDRA_TOKEN") ?? "";
+    process.env.HYDRA_ACP_TOKEN ?? map.get("HYDRA_TOKEN") ?? "";
   if (!hydraToken) {
     throw new Error(
-      "Missing ACP_HYDRA_TOKEN env var (or HYDRA_TOKEN config key). When run as a hydra extension, hydra injects this automatically.",
+      "Missing HYDRA_ACP_TOKEN env var (or HYDRA_TOKEN config key). When run as a hydra extension, hydra injects this automatically.",
     );
   }
   const hydraWsUrl =
-    process.env.ACP_HYDRA_WS_URL ??
+    process.env.HYDRA_ACP_WS_URL ??
     map.get("HYDRA_WS_URL") ??
     deriveWsUrl(hydraDaemonUrl);
 
@@ -158,15 +158,15 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
     perProjectChannels: bool(map, "PER_PROJECT_CHANNELS", true),
     channelPrefix: map.get("CHANNEL_PREFIX") ?? "",
     channelsFile: expandHome(
-      map.get("CHANNELS_FILE") ?? "~/.acp-hydra-slack/channels.json",
+      map.get("CHANNELS_FILE") ?? "~/.hydra-acp-slack/channels.json",
     ),
     showToolOutput: bool(map, "SHOW_TOOL_OUTPUT", false),
     uploadTranscriptOnEnd: bool(map, "UPLOAD_TRANSCRIPT_ON_END", true),
     hiddenMessagesDir: expandHome(
-      map.get("HIDDEN_MESSAGES_DIR") ?? "~/.acp-hydra-slack/hidden",
+      map.get("HIDDEN_MESSAGES_DIR") ?? "~/.hydra-acp-slack/hidden",
     ),
     truncatedMessagesDir: expandHome(
-      map.get("TRUNCATED_MESSAGES_DIR") ?? "~/.acp-hydra-slack/truncated",
+      map.get("TRUNCATED_MESSAGES_DIR") ?? "~/.hydra-acp-slack/truncated",
     ),
     todoDirectory: expandHome(map.get("TODO_DIRECTORY") ?? "~/org/todo"),
     websocketStaleThreshold: intVal(map, "WEBSOCKET_STALE_THRESHOLD", 30),
@@ -183,5 +183,5 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
 }
 
 export function configPath(): string {
-  return process.env.ACP_HYDRA_SLACK_CONF ?? DEFAULT_CONF_PATH;
+  return process.env.HYDRA_ACP_SLACK_CONF ?? DEFAULT_CONF_PATH;
 }
