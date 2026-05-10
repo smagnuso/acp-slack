@@ -1,9 +1,9 @@
 # acp-slack
 
-Bridges every running [acp-multiplex](https://github.com/ElleNajt/acp-multiplex)
-session to a Slack thread, so any ACP agent (Claude Code, Codex, opencode,
-etc.) you have wrapped with `acp-multiplex` shows up in Slack with the same
-UX as `agent-shell-to-go`:
+Bridges every active [acp-hydra](https://github.com/smagnuso/acp-hydra)
+session to a Slack thread, so any ACP agent (Claude Code, Codex, Gemini,
+etc.) running through hydra shows up in Slack with the same UX as
+`agent-shell-to-go`:
 
 - One thread per agent session.
 - Tool calls render as cards with status icons (▶ → ✅ / ❌).
@@ -12,29 +12,28 @@ UX as `agent-shell-to-go`:
   approve or deny.
 - Slack-side messages flow back into the agent as user prompts.
 
-Unlike `agent-shell-to-go`, the daemon attaches at the protocol layer.
-It runs outside Emacs, so:
-
-- Sessions get mirrored automatically — no per-buffer toggle.
-- The bridge keeps running after Emacs closes, as long as the
-  `acp-multiplex` proxy is alive.
+The bridge runs as a hydra extension (or standalone), polls hydra's
+REST API for active sessions, and attaches over WSS to each one.
 
 ## How it works
 
 ```
-   $XDG_RUNTIME_DIR/        +-------------+        Slack
-    acp-multiplex/   <----  |  acp-slack  |  ---->  Web API
-       *.sock               |   daemon    |  <----  Socket Mode WS
-                            +-------------+
-                                  |
-                          ~/.agent-shell/
-                            slack/  (hidden originals)
-                            slack-truncated/  (full output cache)
+                 hydra REST  +-------------+        Slack
+       /v1/sessions   <----  |  acp-slack  |  ---->  Web API
+                             |   daemon    |  <----  Socket Mode WS
+       hydra WSS      <----> |             |
+       /acp                  +-------------+
+                                    |
+                            ~/.agent-shell/
+                              slack/  (hidden originals)
+                              slack-truncated/  (full output cache)
 ```
 
-The daemon watches the socket directory and attaches as a *secondary
-frontend* to each running proxy. The proxy replays cached history on
-attach, then live-updates flow through.
+The daemon polls `GET /v1/sessions` on hydra (default every 2s) and, for
+each new session id it sees, opens a WebSocket to hydra's `/acp`
+endpoint and sends `session/attach` with `role: "controller"`. Hydra
+replays the session's history on attach, then live notifications flow
+through. Slack-side prompts are forwarded back via `session/prompt`.
 
 ## Setup
 
@@ -66,36 +65,44 @@ attach, then live-updates flow through.
    DEBUG=false
    ```
 
-3. **Build & run.**
+3. **Build.**
 
    ```sh
    cd ~/dev/acp-slack
    npm install
    npm run build
+   ```
+
+4. **Run as a hydra extension (recommended).** Add an entry to your
+   `~/.acp-hydra/config.json`:
+
+   ```json
+   {
+     "extensions": [
+       {
+         "name": "acp-slack",
+         "command": ["node", "/home/you/dev/acp-slack/dist/index.js"],
+         "enabled": true
+       }
+     ]
+   }
+   ```
+
+   On `acp-hydra daemon start`, hydra spawns acp-slack with these env
+   vars set: `ACP_HYDRA_DAEMON_URL`, `ACP_HYDRA_TOKEN`, `ACP_HYDRA_WS_URL`.
+   acp-slack uses them to discover and attach to sessions. Stdout/stderr
+   land in `~/.acp-hydra/extensions/acp-slack.log`.
+
+5. **Run standalone (alternative).** Set `HYDRA_DAEMON_URL` and
+   `HYDRA_TOKEN` in `~/.agent-shell-to-go.conf` (or export them as env
+   vars), then:
+
+   ```sh
    npm start
    ```
 
-   Or `npm run dev` for build+start in one go. The daemon prints which
-   socket directory it's watching and which authorized users it accepts.
-
-4. **Optional systemd unit.** Drop in `~/.config/systemd/user/acp-slack.service`:
-
-   ```ini
-   [Unit]
-   Description=acp-slack daemon
-   After=network-online.target
-
-   [Service]
-   Type=simple
-   ExecStart=%h/dev/acp-slack/node_modules/.bin/tsx %h/dev/acp-slack/src/index.ts
-   Restart=on-failure
-   RestartSec=5
-
-   [Install]
-   WantedBy=default.target
-   ```
-
-   Enable with `systemctl --user enable --now acp-slack`.
+   The daemon prints which hydra it's polling and which authorized users
+   it accepts.
 
 ## Configuration keys
 
@@ -118,7 +125,10 @@ attach, then live-updates flow through.
 | `LIVE_QUIET_MS`              | `2000`                               | Inbound silence (ms) needed before considering an attach "live" when `BACKFILL_HISTORY=false`. |
 | `IMAGE_UPLOAD_RATE_LIMIT`    | `30`                                 | Reserved. |
 | `IMAGE_UPLOAD_RATE_WINDOW`   | `60`                                 | Reserved. |
-| `ACP_SOCKET_DIR`             | `$XDG_RUNTIME_DIR/acp-multiplex`     | Override if your sockets live elsewhere. |
+| `HYDRA_DAEMON_URL`           | `http://127.0.0.1:8765`              | Where to reach the hydra daemon. Set automatically when run as a hydra extension. |
+| `HYDRA_WS_URL`               | derived from `HYDRA_DAEMON_URL`      | WebSocket endpoint for ACP attach. Defaults to `ws[s]://<host>:<port>/acp`. |
+| `HYDRA_TOKEN`                | (required)                           | Bearer token for hydra. Set automatically when run as a hydra extension. |
+| `HYDRA_POLL_INTERVAL_MS`     | `2000`                               | How often to poll hydra for session changes. |
 | `DEBUG`                      | `false`                              | Verbose logging. |
 
 ## Reactions

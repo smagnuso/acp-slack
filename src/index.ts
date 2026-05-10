@@ -2,9 +2,9 @@
 import { AcpAttach } from "./acp/attach.js";
 import { SessionBridge } from "./acp/session.js";
 import { configPath, loadConfig } from "./config.js";
+import { HydraDiscovery } from "./hydra-discovery.js";
 import { createSlackApp } from "./slack/app.js";
 import { ThreadClient } from "./slack/thread.js";
-import { SocketWatcher } from "./socket-watcher.js";
 import { ChannelMap } from "./storage/channels.js";
 import { HiddenStore } from "./storage/hidden.js";
 import { TruncatedStore } from "./storage/truncated.js";
@@ -24,7 +24,7 @@ async function main(): Promise<void> {
   setDebug(config.debug);
 
   log.info(`config loaded from ${path}`);
-  log.info(`socket dir: ${config.socketDir}`);
+  log.info(`hydra daemon: ${config.hydraDaemonUrl}`);
   log.info(
     `authorized users: ${config.authorizedUsers.size > 0 ? Array.from(config.authorizedUsers).join(",") + " (whitelist)" : "(empty — all Slack users allowed)"}`,
   );
@@ -50,11 +50,20 @@ async function main(): Promise<void> {
     }
   }, FLUSH_INTERVAL_MS);
 
-  const watcher = new SocketWatcher({
-    dir: config.socketDir,
-    onAdd(socketPath) {
-      log.info(`socket added: ${socketPath}`);
-      const attach = new AcpAttach({ socketPath });
+  const discovery = new HydraDiscovery({
+    daemonUrl: config.hydraDaemonUrl,
+    token: config.hydraToken,
+    pollIntervalMs: config.hydraPollIntervalMs,
+    onAdd(session) {
+      const sessionId = session.sessionId;
+      log.info(
+        `session added: ${sessionId} agent=${session.agentId ?? "?"} cwd=${session.cwd}`,
+      );
+      const attach = new AcpAttach({
+        sessionId,
+        daemonWsUrl: config.hydraWsUrl,
+        token: config.hydraToken,
+      });
       const bridge = new SessionBridge({
         attach,
         config,
@@ -76,31 +85,31 @@ async function main(): Promise<void> {
           .finally(() => {
             bridge.cleanup();
             threadRegistry.unregisterBridge(bridge);
-            bridges.delete(socketPath);
+            bridges.delete(sessionId);
           });
       });
       attach.on("error", (err) => {
         log.warn(`attach error: ${err.message}`);
       });
       attach.start();
-      bridges.set(socketPath, { attach, bridge });
+      bridges.set(sessionId, { attach, bridge });
     },
-    onRemove(socketPath) {
-      log.info(`socket removed: ${socketPath}`);
-      const ctx = bridges.get(socketPath);
+    onRemove(sessionId) {
+      log.info(`session removed: ${sessionId}`);
+      const ctx = bridges.get(sessionId);
       if (ctx) {
         ctx.attach.stop();
-        bridges.delete(socketPath);
+        bridges.delete(sessionId);
       }
     },
   });
-  watcher.start();
+  discovery.start();
 
   const shutdown = async (signal: string) => {
     log.info(`received ${signal}, shutting down`);
     clearInterval(flushTimer);
     try {
-      await watcher.stop();
+      discovery.stop();
       // Flush any pending text before tearing down.
       for (const ctx of bridges.values()) {
         await ctx.bridge.flushAll().catch(() => undefined);

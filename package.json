@@ -1,7 +1,7 @@
 {
   "name": "acp-slack",
   "version": "0.1.0",
-  "description": "Bridge acp-multiplex sockets to Slack threads.",
+  "description": "Bridge acp-hydra sessions to Slack threads.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -20,10 +20,11 @@
   },
   "dependencies": {
     "@slack/bolt": "^4.6.0",
-    "chokidar": "^4.0.3"
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.20.0",
     "typescript": "^5.6.3"
   }

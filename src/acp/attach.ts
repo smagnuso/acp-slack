@@ -1,6 +1,5 @@
 import { EventEmitter } from "node:events";
-import { createConnection, type Socket } from "node:net";
-import { NdjsonParser } from "../util/ndjson.js";
+import { WebSocket } from "ws";
 import { logger } from "../util/log.js";
 import {
   type JsonRpcId,
@@ -16,20 +15,28 @@ import {
 const log = logger("acp");
 
 export interface AttachOptions {
-  socketPath: string;
-  // Initialize params to send right after connect. Sent unconditionally so the
-  // proxy starts replaying its cached history immediately.
+  // Hydra-side session id we're attaching to.
+  sessionId: string;
+  // Hydra daemon's WebSocket URL, e.g. ws://127.0.0.1:8765/acp
+  daemonWsUrl: string;
+  // Bearer token, sent as the `acp-hydra-token.<token>` WS subprotocol.
+  token: string;
+  // Optional initialize/clientCapabilities; sent on connect.
   clientCapabilities?: Record<string, unknown>;
   protocolVersion?: number;
+  // Role to claim on session/attach. acp-slack defaults to controller so it
+  // can post prompts and respond to permission requests; an observer-only
+  // mirror can be configured per channel later.
+  role?: "controller" | "observer";
 }
 
 export interface AttachEvents {
-  "open": [];
-  "close": [{ hadError: boolean }];
-  "error": [Error];
-  "request": [JsonRpcRequest];
-  "notification": [JsonRpcNotification];
-  "response": [JsonRpcResponse];
+  open: [];
+  close: [{ hadError: boolean }];
+  error: [Error];
+  request: [JsonRpcRequest];
+  notification: [JsonRpcNotification];
+  response: [JsonRpcResponse];
 }
 
 interface PendingRequest {
@@ -38,32 +45,26 @@ interface PendingRequest {
 }
 
 export class AcpAttach extends EventEmitter<AttachEvents> {
-  private sock: Socket | undefined;
-  private parser: NdjsonParser;
+  private ws: WebSocket | undefined;
   private nextId = 1;
   private pending = new Map<JsonRpcId, PendingRequest>();
   private connected = false;
-  // Track time of last received message — used by staleness detection.
   private lastFrameAt = 0;
-  // Captured from the initialize response. Identifies the upstream ACP
-  // agent (e.g. {name: "claude-code-acp", version: "..."}). Available
-  // after the "open" event fires.
   private _agentInfo: { name?: string; version?: string } | undefined;
+  private _attachMeta: Record<string, unknown> | undefined;
 
   constructor(private readonly opts: AttachOptions) {
     super();
-    this.parser = new NdjsonParser(
-      (m) => this.onMessage(m as JsonRpcMessage),
-      (err, raw) => {
-        log.warn(
-          `parse error on ${this.opts.socketPath}: ${err.message}; raw=${raw.slice(0, 200)}`,
-        );
-      },
-    );
   }
 
+  // Identifier used for logs, registry keys, etc. Hydra session id is the
+  // stable handle Slack threads should be keyed off.
   get socketPath(): string {
-    return this.opts.socketPath;
+    return this.opts.sessionId;
+  }
+
+  get sessionId(): string {
+    return this.opts.sessionId;
   }
 
   get isConnected(): boolean {
@@ -74,68 +75,71 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
     return this.lastFrameAt;
   }
 
+  // Returns the upstream agent info if exposed via _meta["acp-hydra"].agentId
+  // on the attach response, falling back to the daemon's own agentInfo from
+  // initialize.
   get agentInfo(): { name?: string; version?: string } | undefined {
     return this._agentInfo;
   }
 
-  start(): void {
-    log.debug(`connecting ${this.opts.socketPath}`);
-    const sock = createConnection(this.opts.socketPath);
-    sock.setEncoding("utf8");
-    this.sock = sock;
+  get attachMeta(): Record<string, unknown> | undefined {
+    return this._attachMeta;
+  }
 
-    sock.on("connect", () => {
+  start(): void {
+    log.debug(`connecting ${this.opts.daemonWsUrl} for ${this.opts.sessionId}`);
+    const subprotocols = ["acp.v1", `acp-hydra-token.${this.opts.token}`];
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(this.opts.daemonWsUrl, subprotocols);
+    } catch (err) {
+      this.emit("error", err as Error);
+      return;
+    }
+    this.ws = ws;
+
+    ws.on("open", () => {
       this.connected = true;
       this.lastFrameAt = Date.now();
-      log.info(`attached ${this.opts.socketPath}`);
-      // Send initialize first; only emit "open" once the agent has
-      // acknowledged it, so listeners that want to send follow-up
-      // requests (session/list, etc.) don't race ahead of the handshake.
-      this.request<{ agentInfo?: { name?: string; version?: string } }>(
-        "initialize",
-        {
-          protocolVersion: this.opts.protocolVersion ?? 1,
-          clientCapabilities: this.opts.clientCapabilities ?? {
-            fs: { readTextFile: false, writeTextFile: false },
-            terminal: false,
-          },
-        },
-      )
-        .then((result) => {
-          if (result?.agentInfo && typeof result.agentInfo === "object") {
-            this._agentInfo = result.agentInfo;
-            log.info(
-              `agent ${result.agentInfo.name ?? "?"}${result.agentInfo.version ? ` ${result.agentInfo.version}` : ""} on ${this.opts.socketPath}`,
-            );
-          }
-        })
-        .catch((err: Error) => {
-          log.warn(
-            `initialize failed on ${this.opts.socketPath}: ${err.message}`,
-          );
-        })
-        .finally(() => {
-          this.emit("open");
-        });
+      log.info(`ws open ${this.opts.sessionId}`);
+      // Send initialize first to get hydra's agent info, then session/attach.
+      // Both happen before "open" is emitted to listeners so they don't race
+      // ahead of the handshake.
+      void this.handshake().finally(() => {
+        this.emit("open");
+      });
     });
 
-    sock.on("data", (chunk) => {
+    ws.on("message", (data, isBinary) => {
+      if (isBinary) {
+        return;
+      }
       this.lastFrameAt = Date.now();
-      this.parser.push(chunk);
+      const text = data.toString("utf8");
+      try {
+        const parsed = JSON.parse(text) as JsonRpcMessage;
+        this.onMessage(parsed);
+      } catch (err) {
+        log.warn(
+          `parse error on ${this.opts.sessionId}: ${(err as Error).message}; raw=${text.slice(0, 200)}`,
+        );
+      }
     });
 
-    sock.on("error", (err) => {
-      log.warn(`socket error ${this.opts.socketPath}: ${err.message}`);
+    ws.on("error", (err) => {
+      log.warn(`ws error ${this.opts.sessionId}: ${err.message}`);
       this.emit("error", err);
     });
 
-    sock.on("close", (hadError) => {
+    ws.on("close", (code, reason) => {
+      const hadError = code >= 4000 || code === 1006 || code === 1011;
+      const reasonText = reason.toString("utf8");
       this.connected = false;
-      this.parser.flush();
-      log.info(`detached ${this.opts.socketPath}`);
-      // Reject pending requests so callers don't hang.
+      log.info(
+        `ws closed ${this.opts.sessionId} code=${code}${reasonText ? ` reason=${reasonText}` : ""}`,
+      );
       for (const [, p] of this.pending) {
-        p.reject(new Error("socket closed"));
+        p.reject(new Error("ws closed"));
       }
       this.pending.clear();
       this.emit("close", { hadError });
@@ -143,9 +147,12 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
   }
 
   stop(): void {
-    if (this.sock && !this.sock.destroyed) {
-      this.sock.end();
-      this.sock.destroy();
+    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
+      try {
+        this.ws.close();
+      } catch {
+        void 0;
+      }
     }
   }
 
@@ -163,11 +170,7 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
       this.pending.set(id, {
         resolve: (resp) => {
           if (resp.error) {
-            reject(
-              new Error(
-                `${resp.error.code}: ${resp.error.message}`,
-              ),
-            );
+            reject(new Error(`${resp.error.code}: ${resp.error.message}`));
           } else {
             resolve(resp.result as R);
           }
@@ -177,7 +180,6 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
     });
   }
 
-  // Send a notification (no id, no response).
   notify(method: string, params?: unknown): void {
     const msg: JsonRpcNotification = {
       jsonrpc: "2.0",
@@ -187,7 +189,6 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
     this.write(msg);
   }
 
-  // Reply to a request that came from the agent (e.g., an fs/ request).
   reply(id: JsonRpcId, result: unknown): void {
     const msg: JsonRpcResponse = { jsonrpc: "2.0", id, result };
     this.write(msg);
@@ -202,12 +203,69 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
     this.write(msg);
   }
 
+  private async handshake(): Promise<void> {
+    try {
+      const initResult = await this.request<{
+        agentInfo?: { name?: string; version?: string };
+      }>("initialize", {
+        protocolVersion: this.opts.protocolVersion ?? 1,
+        clientCapabilities: this.opts.clientCapabilities ?? {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+        },
+      });
+      if (initResult?.agentInfo && typeof initResult.agentInfo === "object") {
+        this._agentInfo = initResult.agentInfo;
+      }
+    } catch (err) {
+      log.warn(
+        `initialize failed for ${this.opts.sessionId}: ${(err as Error).message}`,
+      );
+    }
+    try {
+      const attachResult = await this.request<{
+        sessionId: string;
+        replayed?: number;
+        _meta?: Record<string, unknown>;
+      }>("session/attach", {
+        sessionId: this.opts.sessionId,
+        role: this.opts.role ?? "controller",
+        historyPolicy: "full",
+        clientInfo: { name: "acp-slack", version: "0.1.0" },
+      });
+      this._attachMeta = attachResult._meta;
+      const hydraMeta = (attachResult._meta?.["acp-hydra"] ?? {}) as {
+        agentId?: string;
+      };
+      if (hydraMeta.agentId) {
+        this._agentInfo = {
+          name: hydraMeta.agentId,
+          version: this._agentInfo?.version,
+        };
+      }
+      log.info(
+        `attached ${this.opts.sessionId}${
+          this._agentInfo?.name ? ` agent=${this._agentInfo.name}` : ""
+        }${
+          attachResult.replayed !== undefined
+            ? ` replayed=${attachResult.replayed}`
+            : ""
+        }`,
+      );
+    } catch (err) {
+      log.warn(
+        `session/attach failed for ${this.opts.sessionId}: ${(err as Error).message}`,
+      );
+      throw err;
+    }
+  }
+
   private write(msg: JsonRpcMessage): void {
-    if (!this.sock || this.sock.destroyed) {
-      log.warn(`drop write to closed socket: ${JSON.stringify(msg)}`);
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      log.warn(`drop write to closed ws: ${JSON.stringify(msg)}`);
       return;
     }
-    this.sock.write(`${JSON.stringify(msg)}\n`);
+    this.ws.send(JSON.stringify(msg));
   }
 
   private onMessage(m: JsonRpcMessage): void {
@@ -217,7 +275,6 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
         this.pending.delete(m.id);
         p.resolve(m);
       } else {
-        // Response to something we didn't send — could be an old replay.
         log.debug(`unmatched response id=${String(m.id)}`);
       }
       this.emit("response", m);

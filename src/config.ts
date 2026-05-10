@@ -18,7 +18,15 @@ export interface Config {
   websocketStaleThreshold: number;
   imageUploadRateLimit: number;
   imageUploadRateWindow: number;
-  socketDir: string;
+  // Hydra daemon URL/token. Sourced from ACP_HYDRA_DAEMON_URL and
+  // ACP_HYDRA_TOKEN env vars (set by hydra when it spawns this extension)
+  // or, as a fallback, from the config file under HYDRA_DAEMON_URL /
+  // HYDRA_TOKEN.
+  hydraDaemonUrl: string;
+  hydraWsUrl: string;
+  hydraToken: string;
+  // Polling interval for /v1/sessions discovery.
+  hydraPollIntervalMs: number;
   // When true, mirror the proxy's history replay to Slack on attach.
   // Default false — replaying long-running sessions floods the channel
   // and trips Slack's rate limits. Live activity from this point forward
@@ -65,10 +73,14 @@ function parseEnvFile(text: string): Map<string, string> {
   return out;
 }
 
-function defaultSocketDir(): string {
-  const xdg = process.env.XDG_RUNTIME_DIR;
-  const base = xdg && xdg.length > 0 ? xdg : `/run/user/${process.getuid?.() ?? 1000}`;
-  return resolve(base, "acp-multiplex");
+function deriveWsUrl(httpUrl: string): string {
+  if (httpUrl.startsWith("https://")) {
+    return "wss://" + httpUrl.slice("https://".length).replace(/\/$/, "") + "/acp";
+  }
+  if (httpUrl.startsWith("http://")) {
+    return "ws://" + httpUrl.slice("http://".length).replace(/\/$/, "") + "/acp";
+  }
+  throw new Error(`hydraDaemonUrl must start with http:// or https://: ${httpUrl}`);
 }
 
 function bool(map: Map<string, string>, key: string, fallback: boolean): boolean {
@@ -122,6 +134,22 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
     throw new Error(`SLACK_APP_TOKEN missing in ${path}`);
   }
 
+  const hydraDaemonUrl =
+    process.env.ACP_HYDRA_DAEMON_URL ??
+    map.get("HYDRA_DAEMON_URL") ??
+    "http://127.0.0.1:8765";
+  const hydraToken =
+    process.env.ACP_HYDRA_TOKEN ?? map.get("HYDRA_TOKEN") ?? "";
+  if (!hydraToken) {
+    throw new Error(
+      "Missing ACP_HYDRA_TOKEN env var (or HYDRA_TOKEN config key). When run as a hydra extension, hydra injects this automatically.",
+    );
+  }
+  const hydraWsUrl =
+    process.env.ACP_HYDRA_WS_URL ??
+    map.get("HYDRA_WS_URL") ??
+    deriveWsUrl(hydraDaemonUrl);
+
   return {
     slackBotToken,
     slackAppToken,
@@ -144,7 +172,10 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
     websocketStaleThreshold: intVal(map, "WEBSOCKET_STALE_THRESHOLD", 7200),
     imageUploadRateLimit: intVal(map, "IMAGE_UPLOAD_RATE_LIMIT", 30),
     imageUploadRateWindow: intVal(map, "IMAGE_UPLOAD_RATE_WINDOW", 60),
-    socketDir: expandHome(map.get("ACP_SOCKET_DIR") ?? defaultSocketDir()),
+    hydraDaemonUrl,
+    hydraWsUrl,
+    hydraToken,
+    hydraPollIntervalMs: intVal(map, "HYDRA_POLL_INTERVAL_MS", 2000),
     backfillHistory: bool(map, "BACKFILL_HISTORY", false),
     liveQuietMs: intVal(map, "LIVE_QUIET_MS", 2000),
     debug: bool(map, "DEBUG", false),
