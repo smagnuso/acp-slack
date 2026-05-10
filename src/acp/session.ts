@@ -231,11 +231,37 @@ export class SessionBridge {
   >();
   private static readonly OWN_PROMPT_TTL_MS = 60_000;
 
+  // Serializes notification handling. Without this, two notifications
+  // arriving back-to-back (e.g. prompt_received then agent_message_chunk)
+  // run concurrently and race on Slack postMessage ordering — the spinner
+  // can post before the prompt mirror, leaving the prompt visually
+  // "below" its own done-marker in the Slack thread.
+  private notificationChain: Promise<void> = Promise.resolve();
+
   constructor(private readonly opts: SessionBridgeOptions) {
     this.live = opts.config.backfillHistory;
+    opts.attach.on("open", () => {
+      // Open the Slack thread eagerly as soon as we attach to the hydra
+      // session — before any agent activity — so Slack-side users can
+      // post into the thread immediately. acp-multiplex's socket-watcher
+      // had this UX implicitly because the SocketWatcher onAdd was the
+      // de facto session-existence signal; in the hydra model attach is
+      // that signal, so we hook it here.
+      void this.ensureSession(this.opts.sessionMeta.sessionId, {}).catch(
+        (err: unknown) => {
+          log.warn(
+            `eager session-open failed for ${this.opts.sessionMeta.sessionId.slice(0, 8)}: ${(err as Error).message}`,
+          );
+        },
+      );
+    });
     opts.attach.on("notification", (n) => {
       this.bumpLiveTimer();
-      void this.onNotification(n);
+      this.notificationChain = this.notificationChain.then(() =>
+        this.onNotification(n).catch((err: unknown) => {
+          log.warn(`onNotification error: ${(err as Error).message}`);
+        }),
+      );
     });
     opts.attach.on("request", (r) => {
       this.bumpLiveTimer();
@@ -444,19 +470,33 @@ export class SessionBridge {
         // session/prompt to this session. Spec excludes the originator,
         // so receiving this means a sibling frontend (e.g. agent-shell)
         // typed the prompt and we should mirror it into Slack as a user
-        // message — same UX as the old user_message_chunk path. Extract
-        // text from the prompt content blocks; non-text blocks (images,
-        // etc.) are dropped for now (Slack can't render them inline
-        // anyway without an upload, which is out of scope for the mirror).
-        const blocks = (update.prompt ?? []) as Array<Record<string, unknown>>;
-        const text = blocks
-          .filter((b) => b.type === "text" && typeof b.text === "string")
-          .map((b) => b.text as string)
-          .join("");
+        // message. Unlike user_message_chunk (which streams), the entire
+        // prompt arrives in one event, so flush immediately — otherwise
+        // the spinner posted by the agent's first agent_message_chunk
+        // would land in Slack before the prompt mirror.
+        //
+        // Be defensive about content shape: extract text from anything
+        // with a string `text` field, regardless of how the content block
+        // tags itself (`type`, `kind`, or no discriminator at all).
+        const promptField = update.prompt;
+        const blocks = Array.isArray(promptField)
+          ? (promptField as Array<Record<string, unknown>>)
+          : [];
+        const text =
+          typeof promptField === "string"
+            ? promptField
+            : blocks
+                .filter((b) => typeof b.text === "string")
+                .map((b) => b.text as string)
+                .join("");
+        log.info(
+          `prompt_received ${sessionId.slice(0, 8)} text=${text.slice(0, 80)} blocks=${blocks.length}`,
+        );
         if (text.length > 0) {
           await this.flushAgentMessage(session);
           this.closeAgentMessage(session);
           session.userChunks.push(text);
+          await this.flushUserMessage(session);
         }
         break;
       }
@@ -1010,10 +1050,10 @@ export class SessionBridge {
       // notifications would race in, see a session-with-no-threadTs, and
       // post unthreaded.
       const initial = renderParent({
-        title: undefined,
+        title: known.title,
         cwd,
         sessionId,
-        agentName: this.opts.attach.agentInfo?.name,
+        agentName: this.opts.attach.agentInfo?.name ?? known.agentId,
         modelId: undefined,
         modeId: undefined,
         contextUsed: undefined,
