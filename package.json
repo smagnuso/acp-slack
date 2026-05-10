@@ -1,11 +1,11 @@
 {
-  "name": "acp-slack",
+  "name": "acp-hydra-slack",
   "version": "0.1.0",
   "description": "Bridge acp-hydra sessions to Slack threads.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "acp-slack": "dist/index.js"
+    "acp-hydra-slack": "dist/index.js"
   },
   "scripts": {
     "build": "tsc -p .",

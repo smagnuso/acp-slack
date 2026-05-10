@@ -1,4 +1,4 @@
-# acp-slack
+# acp-hydra-slack
 
 Bridges every active [acp-hydra](https://github.com/smagnuso/acp-hydra)
 session to a Slack thread, so any ACP agent (Claude Code, Codex, Gemini,
@@ -19,7 +19,7 @@ REST API for active sessions, and attaches over WSS to each one.
 
 ```
                  hydra REST  +-------------+        Slack
-       /v1/sessions   <----  |  acp-slack  |  ---->  Web API
+       /v1/sessions   <----  |  acp-hydra-slack  |  ---->  Web API
                              |   daemon    |  <----  Socket Mode WS
        hydra WSS      <----> |             |
        /acp                  +-------------+
@@ -54,7 +54,7 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
    SLACK_APP_TOKEN=xapp-...
    SLACK_CHANNEL_ID=C0123456789
 
-   # acp-slack-only keys (ignored by Emacs):
+   # acp-hydra-slack-only keys (ignored by Emacs):
    AUTHORIZED_USERS=U12345678,U23456789
    PER_PROJECT_CHANNELS=true
    SHOW_TOOL_OUTPUT=false
@@ -68,7 +68,7 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
 3. **Build.**
 
    ```sh
-   cd ~/dev/acp-slack
+   cd ~/dev/acp-hydra-slack
    npm install
    npm run build
    ```
@@ -80,18 +80,18 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
    {
      "extensions": [
        {
-         "name": "acp-slack",
-         "command": ["node", "/home/you/dev/acp-slack/dist/index.js"],
+         "name": "acp-hydra-slack",
+         "command": ["node", "/home/you/dev/acp-hydra-slack/dist/index.js"],
          "enabled": true
        }
      ]
    }
    ```
 
-   On `acp-hydra daemon start`, hydra spawns acp-slack with these env
+   On `acp-hydra daemon start`, hydra spawns acp-hydra-slack with these env
    vars set: `ACP_HYDRA_DAEMON_URL`, `ACP_HYDRA_TOKEN`, `ACP_HYDRA_WS_URL`.
-   acp-slack uses them to discover and attach to sessions. Stdout/stderr
-   land in `~/.acp-hydra/extensions/acp-slack.log`.
+   acp-hydra-slack uses them to discover and attach to sessions. Stdout/stderr
+   land in `~/.acp-hydra/extensions/acp-hydra-slack.log`.
 
 5. **Run standalone (alternative).** Set `HYDRA_DAEMON_URL` and
    `HYDRA_TOKEN` in `~/.agent-shell-to-go.conf` (or export them as env
