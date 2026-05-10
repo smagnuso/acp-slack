@@ -721,6 +721,29 @@ export class SessionBridge {
     }
   }
 
+  // Fallback for the case where session/permission_resolved didn't arrive
+  // (or arrived without a matching requestId): if the agent emits a
+  // tool_call_update for our pending permission's toolCallId in any
+  // non-pending state, the decision was clearly made elsewhere — clear
+  // our prompt the same way. resolvePermissionEntry is idempotent.
+  private async maybeResolvePermissionByToolCall(
+    toolCallId: string,
+    status: string | undefined,
+  ): Promise<void> {
+    if (!toolCallId || !status || status === "pending") {
+      return;
+    }
+    for (const entry of this.permissionResolvers.values()) {
+      if (entry.toolCallId === toolCallId) {
+        log.info(
+          `permission resolved-by-tool-call toolCallId=${toolCallId} status=${status} requestId=${typeof entry.requestId}:${String(entry.requestId)}`,
+        );
+        await this.resolvePermissionEntry(entry).catch(() => undefined);
+        return;
+      }
+    }
+  }
+
   private async handleToolCallUpdate(
     session: SessionState,
     update: Record<string, unknown>,
@@ -745,6 +768,7 @@ export class SessionBridge {
     }
     if (typeof update.status === "string") {
       state.status = update.status;
+      await this.maybeResolvePermissionByToolCall(toolCallId, update.status);
     }
     if (typeof update.title === "string") {
       state.title = update.title;
