@@ -20,10 +20,16 @@ export interface SlackApp {
 }
 
 export function createSlackApp(config: Config): SlackApp {
+  // Construct the receiver explicitly so the staleness watchdog below
+  // can access its underlying SocketModeClient. Passing socketMode:true
+  // to bolt.App also creates one, but stores it as a private field.
+  const receiver = new bolt.SocketModeReceiver({
+    appToken: config.slackAppToken,
+    logLevel: config.debug ? bolt.LogLevel.DEBUG : bolt.LogLevel.INFO,
+  });
   const app = new bolt.App({
     token: config.slackBotToken,
-    appToken: config.slackAppToken,
-    socketMode: true,
+    receiver,
     logLevel: config.debug ? bolt.LogLevel.DEBUG : bolt.LogLevel.INFO,
   });
 
@@ -260,19 +266,61 @@ export function createSlackApp(config: Config): SlackApp {
     }
   });
 
+  let watchdogTimer: NodeJS.Timeout | undefined;
+  let lastConnectedAt = 0;
+  let smConnected = false;
+
   return {
     app,
     client: app.client,
     async start() {
       await app.start();
       log.info("Slack Socket Mode connected");
+      lastConnectedAt = Date.now();
+      smConnected = true;
+      // Bolt holds the SocketModeClient on its receiver; tap into its
+      // connect/disconnect events so we can detect a wedged reconnect
+      // loop. When bolt's WebClient gets stuck (e.g. node's DNS or
+      // keep-alive pool turned bad mid-VPN-flap), bolt fires
+      // 'disconnected' and never recovers; we exit so hydra restarts
+      // us with a fresh process.
+      receiver.client.on("connected", () => {
+        smConnected = true;
+        lastConnectedAt = Date.now();
+        log.info("slack socket-mode reconnected");
+      });
+      receiver.client.on("disconnected", () => {
+        smConnected = false;
+        log.warn("slack socket-mode disconnected");
+      });
+      const thresholdMs = config.websocketStaleThreshold * 1_000;
+      watchdogTimer = setInterval(() => {
+        if (smConnected) {
+          return;
+        }
+        const downMs = Date.now() - lastConnectedAt;
+        if (downMs > thresholdMs) {
+          log.error(
+            `slack ws disconnected for ${Math.floor(downMs / 1_000)}s (threshold ${config.websocketStaleThreshold}s); exiting for hydra restart`,
+          );
+          process.exit(1);
+        }
+      }, 5_000);
+      if (typeof watchdogTimer.unref === "function") {
+        watchdogTimer.unref();
+      }
     },
     async stop() {
+      if (watchdogTimer) {
+        clearInterval(watchdogTimer);
+        watchdogTimer = undefined;
+      }
       await app.stop();
       log.info("Slack stopped");
     },
   };
 }
+
 
 async function downloadAsBase64(url: string, botToken: string): Promise<string> {
   const res = await fetch(url, {

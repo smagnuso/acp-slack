@@ -128,7 +128,7 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
 | `HIDDEN_MESSAGES_DIR`       | `~/.acp-hydra-slack/hidden`        | Where 🙈-hidden message originals go. |
 | `TRUNCATED_MESSAGES_DIR`    | `~/.acp-hydra-slack/truncated`     | Where full tool outputs cache for 📖 expand. |
 | `TODO_DIRECTORY`            | `~/org/todo`                       | Where bookmark reactions write TODO files. |
-| `WEBSOCKET_STALE_THRESHOLD` | `7200`                             | Seconds of socket silence before warning is logged. |
+| `WEBSOCKET_STALE_THRESHOLD` | `30`                               | Seconds of continuously-disconnected Slack Socket Mode WS before the bridge `process.exit(1)`s. Hydra's extension manager respawns it ~1s later with a fresh DNS cache + HTTP client; the existing process gets stuck in a reconnect loop after a network flap (VPN drop, etc.). |
 | `BACKFILL_HISTORY`          | `false`                            | If true, replay hydra's cached history into Slack on attach. Off by default — replays trip Slack rate limits and create noise. |
 | `LIVE_QUIET_MS`             | `2000`                             | Inbound silence (ms) needed before considering an attach "live" when `BACKFILL_HISTORY=false`. |
 | `IMAGE_UPLOAD_RATE_LIMIT`   | `30`                               | Reserved. |

@@ -169,7 +169,7 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
       map.get("TRUNCATED_MESSAGES_DIR") ?? "~/.acp-hydra-slack/truncated",
     ),
     todoDirectory: expandHome(map.get("TODO_DIRECTORY") ?? "~/org/todo"),
-    websocketStaleThreshold: intVal(map, "WEBSOCKET_STALE_THRESHOLD", 7200),
+    websocketStaleThreshold: intVal(map, "WEBSOCKET_STALE_THRESHOLD", 30),
     imageUploadRateLimit: intVal(map, "IMAGE_UPLOAD_RATE_LIMIT", 30),
     imageUploadRateWindow: intVal(map, "IMAGE_UPLOAD_RATE_WINDOW", 60),
     hydraDaemonUrl,
