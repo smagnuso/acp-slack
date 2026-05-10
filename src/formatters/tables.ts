@@ -1,7 +1,7 @@
 // Convert markdown tables in a string into aligned, code-fenced tables.
-// Slack's mrkdwn doesn't render markdown tables; the convention from
-// agent-shell-to-go is to convert them to fixed-width plain text inside a
-// ```sh block so they at least line up in monospace.
+// Slack's mrkdwn doesn't render markdown tables; we render them as
+// fixed-width plain text inside a ```sh block so they at least line up
+// in monospace.
 
 const TABLE_LINE = /^\s*\|.*\|\s*$/;
 const SEPARATOR_LINE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/;

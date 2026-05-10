@@ -1,4 +1,4 @@
-// Reaction → action mapping. Mirrors agent-shell-to-go--reaction-map.
+// Reaction → action mapping.
 
 export type ReactionAction =
   | "allow"

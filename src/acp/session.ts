@@ -63,12 +63,12 @@ interface SessionState {
   agentFlushChain: Promise<void> | undefined;
   // Per-session inbound-prompt serializer. Bolt runs app.message handlers
   // in parallel; without this, three Slack messages typed in quick
-  // succession produce three concurrent session/prompt requests, the
-  // proxy synthesizes user_message_chunks for all of them back-to-back,
-  // and sibling frontends (agent-shell) merge them into a single rendered
-  // prompt because no agent activity falls between them. Queueing forces
-  // turn-by-turn flow: each prompt awaits the previous one's response
-  // (and our own-turn-end close) before sending.
+  // succession produce three concurrent session/prompt requests, hydra
+  // fans user_message_chunks for all of them back-to-back, and sibling
+  // frontends merge them into a single rendered prompt because no agent
+  // activity falls between them. Queueing forces turn-by-turn flow: each
+  // prompt awaits the previous one's response (and our own-turn-end
+  // close) before sending.
   promptChain: Promise<void> | undefined;
   // Number of Slack-originated prompts currently in flight on this
   // session (queued or running). Incremented at enqueue, decremented
@@ -93,8 +93,8 @@ interface SessionState {
   // that moment. Cleared after transition or when sendUserPromptWork
   // returns (whichever comes first).
   pendingProcessingEntry: QueuedPromptEntry | undefined;
-  // Streaming user message from another frontend (the primary, e.g.
-  // agent-shell typing into the same session). Same flush model as agent.
+  // Streaming user message from another frontend attached to the same
+  // session (e.g. the editor's stdio shim). Same flush model as agent.
   userChunks: string[];
   // Last known title for chat.update of the thread header.
   title: string | undefined;
@@ -102,11 +102,11 @@ interface SessionState {
   cwd: string | undefined;
   // Per-session agent state observed from streaming notifications.
   // modeId tracks current_mode_update; modelId tracks
-  // current_model_update (acp-multiplex synthesizes both on the
-  // corresponding session/set_* responses). Usage fields track
-  // usage_update notifications: contextUsed/Size are token counts
-  // for the active context window; cost is the running cost the
-  // agent reports for the session.
+  // current_model_update (hydra synthesizes both on the corresponding
+  // session/set_* responses). Usage fields track usage_update
+  // notifications: contextUsed/Size are token counts for the active
+  // context window; cost is the running cost the agent reports for the
+  // session.
   modeId: string | undefined;
   modelId: string | undefined;
   contextUsed: number | undefined;
@@ -162,19 +162,30 @@ export interface SessionBridgeOptions {
   channels: ChannelMap;
   truncatedStore: TruncatedStore;
   hiddenStore: HiddenStore;
+  // Session-level metadata sourced from hydra's HydraSessionInfo.
+  // Provides the cwd / title / agentId we'd previously bootstrap by
+  // calling `session/list` over the WS attach. With one bridge per
+  // hydra session, these are known up front.
+  sessionMeta: {
+    sessionId: string;
+    cwd: string | undefined;
+    title: string | undefined;
+    agentId: string | undefined;
+  };
 }
 
-// One SessionBridge per acp-multiplex socket. Maintains per-session
-// (sessionId) state — most sockets have a single session but the protocol
-// allows multiple, so the bridge holds a map.
+// One SessionBridge per hydra session. The discovery layer
+// (HydraDiscovery) creates a bridge for each live session it sees;
+// each bridge owns one WS attach to /acp on hydra and renders that
+// session's traffic into a Slack thread.
 //
-// Replay handling: when we attach, the proxy replays everything cached
-// for that session. We don't want each replayed event posting to Slack
-// (rate limits, noise). The bridge starts in `replay` mode where every
-// frame resets a quiet timer; once the timer fires (~2s of inbound
-// silence) we flip to `live` and start posting. Replayed events still
-// build internal state so we know about active sessions/tool calls, we
-// just don't surface them.
+// Replay handling: hydra replays cached history on attach. We don't
+// want each replayed event posting to Slack (rate limits, noise). The
+// bridge starts in `replay` mode where every frame resets a quiet
+// timer; once the timer fires (~2s of inbound silence) we flip to
+// `live` and start posting. Replayed events still build internal
+// state so we know about in-flight tool calls, we just don't surface
+// them.
 export class SessionBridge {
   private sessions = new Map<string, SessionState>();
   // While a session's thread is being opened, concurrent notifications
@@ -203,32 +214,17 @@ export class SessionBridge {
       promptChannel: string | undefined;
     }
   >();
-  // Human-readable name for this proxy/bridge, set via the proxy's
-  // ACP_MULTIPLEX_NAME env var and delivered as the first frame on a
-  // secondary attach (acp-multiplex/meta notification). Per-proxy, not
-  // per-session, so the same name applies to every session that runs in
-  // the same agent process. Used as a fallback heading in renderParent
-  // between the agent-supplied title and basename(cwd).
-  private bridgeName: string | undefined;
-
   // When backfillHistory is true, we surface every replayed event. When
   // false (the default), we discard the proxy's history replay and only
   // post Slack messages once the inbound stream has been quiet for
   // `liveQuietMs`. See SessionBridge class doc.
   private live: boolean;
   private liveTimer: NodeJS.Timeout | undefined;
-  // Sessions we've learned about but haven't surfaced to Slack yet
-  // (because we're still in replay). When the bridge goes live we open
-  // threads for any entry here that isn't already a live SessionState.
-  private discovered = new Map<
-    string,
-    { sessionId: string; cwd?: string; title?: string }
-  >();
 
-  // Texts of session/prompt requests we sent ourselves, kept around so we
-  // can suppress the user_message_chunk that acp-multiplex synthesizes
-  // back to all attached frontends (us included). FIFO per session;
-  // entries time out so we don't leak if the proxy doesn't echo.
+  // Texts of session/prompt requests we sent ourselves, kept around so
+  // we can suppress the user_message_chunk that hydra fans back out to
+  // all attached frontends (us included). FIFO per session; entries
+  // time out so we don't leak if the proxy doesn't echo.
   private recentOwnPrompts = new Map<
     string,
     Array<{ text: string; at: number }>
@@ -237,9 +233,6 @@ export class SessionBridge {
 
   constructor(private readonly opts: SessionBridgeOptions) {
     this.live = opts.config.backfillHistory;
-    opts.attach.on("open", () => {
-      void this.discoverSessions().then(() => this.eagerAttachThreads());
-    });
     opts.attach.on("notification", (n) => {
       this.bumpLiveTimer();
       void this.onNotification(n);
@@ -253,144 +246,6 @@ export class SessionBridge {
     }
   }
 
-  // Pre-fetches metadata for any session the agent reports via
-  // session/list. Does NOT open threads — agents like opencode keep their
-  // entire session history here (we've seen 100+) and we'd flood Slack
-  // with dormant threads. Threads still open lazily in ensureSession on
-  // the first live notification for a session; discovery just lets us
-  // apply the right cwd/title at that moment.
-  private async discoverSessions(): Promise<void> {
-    let sessions: Array<Record<string, unknown>> = [];
-    try {
-      const result = await this.opts.attach.request<{
-        sessions?: Array<Record<string, unknown>>;
-      }>("session/list", {});
-      sessions = result.sessions ?? [];
-    } catch (err) {
-      log.debug(
-        `session/list not supported on ${this.opts.attach.socketPath}: ${(err as Error).message}`,
-      );
-      return;
-    }
-    // Log the shape of the first session entry so we can see what fields
-    // the agent actually returns beyond what we currently consume
-    // (sessionId/cwd/title). Useful for surfacing more data later.
-    if (sessions.length > 0 && sessions[0]) {
-      log.info(
-        `session/list entry shape: ${Object.keys(sessions[0]).sort().join(", ")}`,
-      );
-    }
-    for (const s of sessions) {
-      const sessionId = (s.sessionId ?? s.id) as string | undefined;
-      if (!sessionId) {
-        continue;
-      }
-      this.discovered.set(sessionId, {
-        sessionId,
-        cwd: typeof s.cwd === "string" ? s.cwd : undefined,
-        title: typeof s.title === "string" ? s.title : undefined,
-      });
-    }
-    log.info(
-      `discovered metadata for ${this.discovered.size} session(s) on ${this.opts.attach.socketPath}`,
-    );
-  }
-
-  // After discoverSessions, scan each relevant Slack channel once and
-  // pre-register thread mappings for any session whose marker we find.
-  // This makes inbound Slack messages route correctly *before* the
-  // session emits any agent-side notification — without this, typing
-  // into a thread for a quiet session lands at threadRegistry with no
-  // entry and gets dropped as "no bridge for thread."
-  //
-  // Cost: one conversations.history scan per unique target channel,
-  // capped by findSessionThreadsInChannel's 1000-message safety. The
-  // lazy createSession path still kicks in for any session we miss.
-  private async eagerAttachThreads(): Promise<void> {
-    const channelToSessionIds = new Map<string, string[]>();
-    for (const [sessionId, meta] of this.discovered) {
-      const channel = this.resolveChannel(meta.cwd);
-      if (!channel) {
-        continue;
-      }
-      const list = channelToSessionIds.get(channel) ?? [];
-      list.push(sessionId);
-      channelToSessionIds.set(channel, list);
-    }
-    for (const [channel, sessionIds] of channelToSessionIds) {
-      const matches = await this.opts.thread.findSessionThreadsInChannel(
-        channel,
-      );
-      let attached = 0;
-      for (const sessionId of sessionIds) {
-        const threadTs = matches.get(sessionId);
-        if (!threadTs) {
-          continue;
-        }
-        if (this.materializeFromMarker(sessionId, channel, threadTs)) {
-          attached++;
-        }
-      }
-      log.info(
-        `eager-attached ${attached} thread(s) in ${channel} (scanned ${matches.size} marker(s))`,
-      );
-    }
-  }
-
-  // Build a SessionState from a sessionId + thread we already opened in
-  // a previous daemon lifetime, without posting anything new. Returns
-  // false if a SessionState already exists (e.g. a live notification
-  // raced ahead of eager attach and triggered createSession).
-  private materializeFromMarker(
-    sessionId: string,
-    channel: string,
-    threadTs: string,
-  ): boolean {
-    if (this.sessions.has(sessionId)) {
-      return false;
-    }
-    const known = this.discovered.get(sessionId);
-    const session: SessionState = {
-      sessionId,
-      threadTs,
-      channel,
-      toolCalls: new Map(),
-      agentChunks: [],
-      agentMessageTs: undefined,
-      agentLastSent: undefined,
-      agentFlushChain: undefined,
-      promptChain: undefined,
-      queuedPromptCount: 0,
-      queuedPrompts: [],
-      pendingProcessingEntry: undefined,
-      userChunks: [],
-      title: known?.title,
-      cwd: known?.cwd,
-      modeId: undefined,
-      modelId: undefined,
-      contextUsed: undefined,
-      contextSize: undefined,
-      costAmount: undefined,
-      costCurrency: undefined,
-      spinnerTs: undefined,
-      spinnerExpanded: false,
-      turnToolCallIds: [],
-      spinnerChain: undefined,
-      spinnerStartedAt: undefined,
-      spinnerTicker: undefined,
-      planTs: undefined,
-      hadActivity: false,
-    };
-    this.sessions.set(sessionId, session);
-    threadRegistry.register({
-      bridge: this,
-      sessionId,
-      channel,
-      threadTs,
-    });
-    return true;
-  }
-
   private bumpLiveTimer(): void {
     if (this.live) {
       return;
@@ -400,7 +255,7 @@ export class SessionBridge {
     }
     this.liveTimer = setTimeout(() => {
       this.live = true;
-      log.info(`live: ${this.opts.attach.socketPath}`);
+      log.info(`live: ${this.opts.attach.sessionId}`);
     }, this.opts.config.liveQuietMs);
   }
 
@@ -420,25 +275,18 @@ export class SessionBridge {
 
   private async onNotification(n: JsonRpcNotification): Promise<void> {
     const params = (n.params ?? {}) as Record<string, unknown>;
-    // acp-multiplex/meta is delivered as the very first frame on a
-    // secondary attach (cache.go: meta replays before initialize).
-    // It's proxy-level metadata, not session activity, so handle it
-    // before the live-gate would drop it as "replayed history."
     // A sibling frontend answered a permission request before us. Tear
     // down our (now-stale) Slack prompt. Lives outside the live-gate
-    // because — like meta — it's a transient proxy-level signal, not
-    // session activity. Idempotent: if we don't have an entry for the
-    // requestId, no-op.
-    if (n.method === "acp-multiplex/permission_resolved") {
+    // because it's a transient signal, not session activity. Idempotent:
+    // if we don't have an entry for the requestId, no-op.
+    if (n.method === "session/permission_resolved") {
       const requestId = params.requestId as string | number | undefined;
       if (requestId === undefined) {
         return;
       }
-      // Compare via String() because the proxy synthesizes requestId
-      // as a JSON string (it's the raw-bytes-as-Go-string key from
-      // its pendingReverse map), while our entry.requestId is the
-      // parsed JSON-RPC id — typically a number. `42 === "42"` is
-      // false; coerce both sides.
+      // Compare via String() because hydra forwards requestId as a JSON
+      // string while our entry.requestId is the parsed JSON-RPC id —
+      // typically a number. `42 === "42"` is false; coerce both sides.
       const want = String(requestId);
       let matched = false;
       const entry = this.permissionResolvers.get(want);
@@ -456,22 +304,6 @@ export class SessionBridge {
         log.info(
           `permission_resolved miss requestId=${typeof requestId}:${want} known=[${known.join(",")}]`,
         );
-      }
-      return;
-    }
-
-    if (n.method === "acp-multiplex/meta") {
-      const name = typeof params.name === "string" ? params.name : undefined;
-      if (name && name !== this.bridgeName) {
-        this.bridgeName = name;
-        log.info(`bridge name: ${name}`);
-        // Refresh any threads we've already opened so they pick up the
-        // new heading. Usually this is empty (meta arrives during the
-        // initial replay window before the bridge has gone live and
-        // opened any thread), but we re-render defensively.
-        for (const session of this.sessions.values()) {
-          await this.refreshParent(session).catch(() => undefined);
-        }
       }
       return;
     }
@@ -499,9 +331,8 @@ export class SessionBridge {
   }
 
   // Re-render the thread parent with the current state. Used when
-  // proxy-level metadata (e.g. bridgeName) arrives after a thread is
-  // already open, or any other case where the heading inputs change
-  // outside of session/title-changed.
+  // heading inputs change (mode/model/usage updates, etc.) outside of
+  // session/title-changed.
   private async refreshParent(session: SessionState): Promise<void> {
     if (!session.threadTs) {
       return;
@@ -513,7 +344,6 @@ export class SessionBridge {
         title: session.title,
         cwd: session.cwd,
         sessionId: session.sessionId,
-        bridgeName: this.bridgeName,
         agentName: this.opts.attach.agentInfo?.name,
         modelId: session.modelId,
         modeId: session.modeId,
@@ -579,9 +409,8 @@ export class SessionBridge {
 
     switch (kind) {
       case "agent_thought_chunk": {
-        // We don't surface thought content in Slack (it's noisy and
-        // intentionally a diagnostic view in agent-shell), but the
-        // existence is the earliest signal that a turn is actually
+        // We don't surface thought content in Slack (it's noisy), but
+        // its existence is the earliest signal that a turn is actually
         // running. Post the spinner now so the user has proof of life
         // before any agent text or tool call materializes.
         await this.ensureSpinner(session);
@@ -611,13 +440,12 @@ export class SessionBridge {
         break;
       }
       case "turn_complete": {
-        // Synthesized by acp-multiplex when the agent's session/prompt
-        // response arrives. Finalize any open streaming agent message so
-        // the next turn's chunks start a fresh Slack message, and
-        // transform the per-turn spinner into a static marker. The
-        // stopReason carries through to the marker so a user-cancelled
-        // turn (agent-shell C-c, etc.) reads as "cancelled" rather
-        // than the success default.
+        // Synthesized by hydra when the agent's session/prompt response
+        // arrives. Finalize any open streaming agent message so the
+        // next turn's chunks start a fresh Slack message, and transform
+        // the per-turn spinner into a static marker. The stopReason
+        // carries through to the marker so a user-cancelled turn reads
+        // as "cancelled" rather than the success default.
         const stopReason = update.stopReason as string | undefined;
         log.info(
           `turn_complete ${sessionId.slice(0, 8)}${stopReason ? ` (${stopReason})` : ""}`,
@@ -779,7 +607,7 @@ export class SessionBridge {
 
   // Resolve a permission entry: clear from the resolver map and, if the
   // prompt was actually posted to Slack, delete it. Used both when a
-  // sibling frontend answered first (acp-multiplex/permission_resolved
+  // sibling frontend answered first (session/permission_resolved
   // notification) and when this client itself answered (so we can drop
   // the now-irrelevant prompt — the user already gave their reaction).
   private async resolvePermissionEntry(
@@ -1009,8 +837,7 @@ export class SessionBridge {
   // entry point's bridge-close path before cleanup, gated on
   // config.uploadTranscriptOnEnd. Source of truth is the Slack thread
   // itself (conversations.replies) — captures exactly what the user
-  // saw in the channel, no coupling to agent-shell's internal
-  // transcript file format.
+  // saw in the channel.
   async uploadTranscriptsOnExit(): Promise<void> {
     if (!this.opts.config.uploadTranscriptOnEnd) {
       return;
@@ -1130,10 +957,10 @@ export class SessionBridge {
     sessionId: string,
     params: Record<string, unknown>,
   ): Promise<SessionState | undefined> {
-    // Prefer cwd from the live notification, fall back to whatever
-    // session/list told us about this sessionId.
-    const known = this.discovered.get(sessionId);
-    const cwd = this.cwdFromParams(params) ?? known?.cwd;
+    // Prefer cwd from the live notification, fall back to the
+    // sessionMeta hydra discovery handed us at construction time.
+    const known = this.opts.sessionMeta;
+    const cwd = this.cwdFromParams(params) ?? known.cwd;
     const channel = this.resolveChannel(cwd);
     if (!channel) {
       log.warn(
@@ -1165,7 +992,6 @@ export class SessionBridge {
         title: undefined,
         cwd,
         sessionId,
-        bridgeName: this.bridgeName,
         agentName: this.opts.attach.agentInfo?.name,
         modelId: undefined,
         modeId: undefined,
@@ -1224,7 +1050,7 @@ export class SessionBridge {
     // If discovery already gave us a title, apply it so the header
     // reflects the topic immediately rather than waiting for a
     // title-changed event.
-    if (known?.title) {
+    if (known.title) {
       await this.applyTitle(sessionId, known.title).catch(() => undefined);
     }
     return session;
@@ -1264,7 +1090,6 @@ export class SessionBridge {
         title,
         cwd: session.cwd,
         sessionId,
-        bridgeName: this.bridgeName,
         agentName: this.opts.attach.agentInfo?.name,
         modelId: session.modelId,
         modeId: session.modeId,
@@ -1350,10 +1175,10 @@ export class SessionBridge {
   }
 
   // Flush accumulated user-message chunks (input from another frontend
-  // attached to the same session — typically the primary agent-shell
+  // attached to the same session — typically the editor's stdio shim
   // typing). Drops the message if it matches a prompt we just sent
-  // ourselves, since acp-multiplex broadcasts the synthesized
-  // user_message_chunk back to every frontend.
+  // ourselves, since hydra fans the synthesized user_message_chunk back
+  // to every attached frontend.
   async flushUserMessage(session: SessionState): Promise<void> {
     if (session.userChunks.length === 0) {
       return;
@@ -1491,16 +1316,16 @@ export class SessionBridge {
       return;
     }
     // wasQueued covers both "another Slack prompt is ahead of us" and
-    // "the agent is currently mid-turn on something else (e.g. an
-    // agent-shell-originated prompt)". For the latter, agents
-    // generally serialize per-session, so our session/prompt will
-    // wait for the in-flight turn to finish. An active spinner is a
-    // reliable proxy for "agent is busy on this session."
+    // "the agent is currently mid-turn on something else (e.g. a prompt
+    // from another attached frontend)". For the latter, agents generally
+    // serialize per-session, so our session/prompt will wait for the
+    // in-flight turn to finish. An active spinner is a reliable proxy
+    // for "agent is busy on this session."
     const wasQueued =
       session.queuedPromptCount > 0 || session.spinnerTs !== undefined;
     // Number of in-flight turns the agent has to finish before getting
     // to us. queuedPromptCount counts Slack-originated prompts; if it
-    // is 0 but a spinner is up, that's an agent-shell-originated turn
+    // is 0 but a spinner is up, that's a turn from another frontend
     // we're queueing behind, so count it as 1.
     const aheadCount =
       session.queuedPromptCount > 0
@@ -1691,11 +1516,11 @@ export class SessionBridge {
       sessionId,
       prompt,
     });
-    // When we are the originator, acp-multiplex excludes us from the
-    // synthesized turn_complete broadcast (proxy.go: broadcastExcept).
-    // The session/prompt response is the turn-end signal for this side,
-    // so finalize the agent message here — otherwise the next turn's
-    // chunks would chat.update into this turn's still-open message.
+    // When we are the originator, hydra excludes us from the
+    // synthesized turn_complete broadcast. The session/prompt response
+    // is the turn-end signal for this side, so finalize the agent
+    // message here — otherwise the next turn's chunks would
+    // chat.update into this turn's still-open message.
     const stopReason = response?.stopReason;
     log.info(
       `own-turn end ${sessionId.slice(0, 8)}${stopReason ? ` (${stopReason})` : ""}`,
@@ -1995,7 +1820,6 @@ export class SessionBridge {
         channel: s?.channel,
         cwd: s?.cwd,
         title: s?.title,
-        socketPath: this.opts.attach.socketPath,
         connected: this.opts.attach.isConnected,
         lastFrameAt: new Date(this.opts.attach.lastFrameTime).toISOString(),
       },
@@ -2011,9 +1835,6 @@ export class SessionBridge {
 //
 // Heading priority:
 //   title       — agent-supplied per-session, e.g. via session/title-changed
-//   bridgeName  — proxy-supplied per-process via ACP_MULTIPLEX_NAME and the
-//                 acp-multiplex/meta notification; same name across every
-//                 session running in that proxy
 //   basename(cwd) — derived per-session
 //   none        — fall back to just the marker line, since the only thing
 //                 left would be the sessionId, which already appears in
@@ -2032,7 +1853,6 @@ function renderParent(opts: {
   title: string | undefined;
   cwd: string | undefined;
   sessionId: string;
-  bridgeName: string | undefined;
   agentName: string | undefined;
   modelId: string | undefined;
   modeId: string | undefined;
@@ -2042,7 +1862,7 @@ function renderParent(opts: {
   costCurrency: string | undefined;
 }): string {
   const heading =
-    opts.title ?? opts.bridgeName ?? (opts.cwd ? basename(opts.cwd) : undefined);
+    opts.title ?? (opts.cwd ? basename(opts.cwd) : undefined);
   const lines: string[] = [];
   if (heading) {
     lines.push(`:robot_face: *${heading}*`);

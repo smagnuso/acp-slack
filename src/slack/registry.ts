@@ -4,15 +4,12 @@ import type { SessionBridge } from "../acp/session.js";
 // sessionId to act. SessionBridges register threads here when they open
 // them; handlers look them up.
 //
-// Multi-entry: when several proxies are running against the same Claude
-// Code session DB (each acp-multiplex spawns its own agent process,
-// but session/list returns the same global session set), more than one
-// bridge ends up claiming the same (channel, threadTs) on attach. The
-// session is only actually live in *one* of those agent processes; the
-// others would return -32603 Internal error if asked to handle a prompt
-// for it. We keep all candidates and prefer the one that has shown
-// agent-side activity for the session (promoted via promote()), with
-// app.ts's message handler falling back to others if the first fails.
+// Multi-entry: hydra normally produces one bridge per session, but we
+// keep the registry tolerant of multiple bridges claiming the same
+// (channel, threadTs) — e.g. across a daemon-restart overlap window —
+// and prefer the one that has shown agent-side activity (promoted via
+// promote()), with app.ts's message handler falling back to others if
+// the first fails.
 export interface ThreadEntry {
   bridge: SessionBridge;
   sessionId: string;

@@ -77,21 +77,19 @@ export class ThreadClient {
   }
 
   // Scan a channel for thread parents we previously opened for any of
-  // our sessions. Each parent carries `_session <uuid>_` (see
-  // renderParent → sessionMarker), so a single regex over channel
-  // history rebuilds the sessionId → threadTs map without any local
-  // disk state.
+  // Scan channel history for the thread parent that carries
+  // `_session <sessionId>_` (see renderParent → sessionMarker). Lets a
+  // daemon restart rediscover its session's existing thread without any
+  // local disk state.
   //
   // Capped at ~1000 messages (10 pages of 100). A busier channel may
-  // miss the oldest threads; those reattach lazily via
-  // findSessionThread(channel, sessionId) when their session next fires
-  // a notification, OR get re-opened as a new thread (the worst case is
-  // fragmentation, not loss).
-  async findSessionThreadsInChannel(
+  // miss older threads — those will be reopened as new threads (worst
+  // case is fragmentation, not loss).
+  async findSessionThread(
     channel: string,
-  ): Promise<Map<string, string>> {
-    const out = new Map<string, string>();
-    const re = /_session ([0-9a-f-]{36})_/g;
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const marker = `_session ${sessionId}_`;
     let cursor: string | undefined;
     let scanned = 0;
     const cap = 1000;
@@ -105,43 +103,29 @@ export class ThreadClient {
         });
       } catch (err) {
         log.warn(
-          `findSessionThreadsInChannel: conversations.history(${channel}) failed: ${(err as Error).message}`,
+          `findSessionThread: conversations.history(${channel}) failed: ${(err as Error).message}`,
         );
-        return out;
+        return undefined;
       }
       const messages = res.messages ?? [];
       for (const m of messages) {
         if (typeof m.text !== "string") {
           continue;
         }
-        re.lastIndex = 0;
-        const match = re.exec(m.text);
-        if (match?.[1]) {
+        if (m.text.includes(marker)) {
           const ts = m.thread_ts ?? m.ts;
-          if (typeof ts === "string" && !out.has(match[1])) {
-            out.set(match[1], ts);
+          if (typeof ts === "string") {
+            return ts;
           }
         }
       }
       scanned += messages.length;
       cursor = res.response_metadata?.next_cursor;
       if (!cursor) {
-        return out;
+        return undefined;
       }
     }
-    return out;
-  }
-
-  // Scan a channel for the thread parent of a single sessionId. Used by
-  // the lazy-reattach path in createSession when a session emits a live
-  // notification before eager attach has materialized it (or for
-  // sessions outside the eager-attach scope).
-  async findSessionThread(
-    channel: string,
-    sessionId: string,
-  ): Promise<string | undefined> {
-    const matches = await this.findSessionThreadsInChannel(channel);
-    return matches.get(sessionId);
+    return undefined;
   }
 
   // Fetch every reply in a thread, paginating through Slack's

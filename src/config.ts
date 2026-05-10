@@ -38,7 +38,7 @@ export interface Config {
   debug: boolean;
 }
 
-const DEFAULT_CONF_PATH = resolve(homedir(), ".agent-shell-to-go.conf");
+const DEFAULT_CONF_PATH = resolve(homedir(), ".acp-hydra-slack.conf");
 
 const TRUTHY = new Set(["1", "true", "yes", "on", "t"]);
 
@@ -120,7 +120,7 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
   } catch (err) {
     throw new Error(
       `Cannot read config at ${path}: ${(err as Error).message}. ` +
-        `Set ACP_SLACK_CONF env var to override.`,
+        `Set ACP_HYDRA_SLACK_CONF env var to override.`,
     );
   }
   const map = parseEnvFile(text);
@@ -158,15 +158,15 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
     perProjectChannels: bool(map, "PER_PROJECT_CHANNELS", true),
     channelPrefix: map.get("CHANNEL_PREFIX") ?? "",
     channelsFile: expandHome(
-      map.get("CHANNELS_FILE") ?? "~/.agent-shell/slack-channels.json",
+      map.get("CHANNELS_FILE") ?? "~/.acp-hydra-slack/channels.json",
     ),
     showToolOutput: bool(map, "SHOW_TOOL_OUTPUT", false),
     uploadTranscriptOnEnd: bool(map, "UPLOAD_TRANSCRIPT_ON_END", true),
     hiddenMessagesDir: expandHome(
-      map.get("HIDDEN_MESSAGES_DIR") ?? "~/.agent-shell/slack",
+      map.get("HIDDEN_MESSAGES_DIR") ?? "~/.acp-hydra-slack/hidden",
     ),
     truncatedMessagesDir: expandHome(
-      map.get("TRUNCATED_MESSAGES_DIR") ?? "~/.agent-shell/slack-truncated",
+      map.get("TRUNCATED_MESSAGES_DIR") ?? "~/.acp-hydra-slack/truncated",
     ),
     todoDirectory: expandHome(map.get("TODO_DIRECTORY") ?? "~/org/todo"),
     websocketStaleThreshold: intVal(map, "WEBSOCKET_STALE_THRESHOLD", 7200),
@@ -183,5 +183,5 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
 }
 
 export function configPath(): string {
-  return process.env.ACP_SLACK_CONF ?? DEFAULT_CONF_PATH;
+  return process.env.ACP_HYDRA_SLACK_CONF ?? DEFAULT_CONF_PATH;
 }

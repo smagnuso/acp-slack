@@ -1,4 +1,4 @@
-// Tool-call rendering matches agent-shell-to-go's status icons:
+// Tool-call rendering. Status icons:
 //   pending      ▶
 //   in_progress  🔄
 //   completed    ✅

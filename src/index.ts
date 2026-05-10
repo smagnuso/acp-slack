@@ -71,6 +71,12 @@ async function main(): Promise<void> {
         channels,
         truncatedStore,
         hiddenStore,
+        sessionMeta: {
+          sessionId,
+          cwd: session.cwd,
+          title: session.title,
+          agentId: session.agentId,
+        },
       });
       attach.on("close", () => {
         // Run the transcript dump (if enabled) before tearing down so

@@ -57,12 +57,6 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
     super();
   }
 
-  // Identifier used for logs, registry keys, etc. Hydra session id is the
-  // stable handle Slack threads should be keyed off.
-  get socketPath(): string {
-    return this.opts.sessionId;
-  }
-
   get sessionId(): string {
     return this.opts.sessionId;
   }

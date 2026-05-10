@@ -2,8 +2,7 @@
 
 Bridges every active [acp-hydra](https://github.com/smagnuso/acp-hydra)
 session to a Slack thread, so any ACP agent (Claude Code, Codex, Gemini,
-etc.) running through hydra shows up in Slack with the same UX as
-`agent-shell-to-go`:
+etc.) running through hydra shows up in Slack:
 
 - One thread per agent session.
 - Tool calls render as cards with status icons (▶ → ✅ / ❌).
@@ -24,9 +23,10 @@ REST API for active sessions, and attaches over WSS to each one.
        hydra WSS      <----> |             |
        /acp                  +-------------+
                                     |
-                            ~/.agent-shell/
-                              slack/  (hidden originals)
-                              slack-truncated/  (full output cache)
+                            ~/.acp-hydra-slack/
+                              hidden/     (hidden originals)
+                              truncated/  (full output cache)
+                              channels.json  (cwd → channel map)
 ```
 
 The daemon polls `GET /v1/sessions` on hydra (default every 2s) and, for
@@ -46,20 +46,18 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
    - Subscribe to events: `message.channels`, `message.groups`,
      `message.im`, `reaction_added`, `reaction_removed`.
    - Install the app to your workspace and grab the bot token (`xoxb-...`).
-2. **Config file.** Place credentials at `~/.agent-shell-to-go.conf` (the
-   same file `agent-shell-to-go.el` reads, so the two can share):
+2. **Config file.** Place credentials at `~/.acp-hydra-slack.conf`:
 
    ```
    SLACK_BOT_TOKEN=xoxb-...
    SLACK_APP_TOKEN=xapp-...
    SLACK_CHANNEL_ID=C0123456789
 
-   # acp-hydra-slack-only keys (ignored by Emacs):
    AUTHORIZED_USERS=U12345678,U23456789
    PER_PROJECT_CHANNELS=true
    SHOW_TOOL_OUTPUT=false
-   HIDDEN_MESSAGES_DIR=~/.agent-shell/slack
-   TRUNCATED_MESSAGES_DIR=~/.agent-shell/slack-truncated
+   HIDDEN_MESSAGES_DIR=~/.acp-hydra-slack/hidden
+   TRUNCATED_MESSAGES_DIR=~/.acp-hydra-slack/truncated
    TODO_DIRECTORY=~/org/todo
    WEBSOCKET_STALE_THRESHOLD=7200
    DEBUG=false
@@ -94,7 +92,7 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
    land in `~/.acp-hydra/extensions/acp-hydra-slack.log`.
 
 5. **Run standalone (alternative).** Set `HYDRA_DAEMON_URL` and
-   `HYDRA_TOKEN` in `~/.agent-shell-to-go.conf` (or export them as env
+   `HYDRA_TOKEN` in `~/.acp-hydra-slack.conf` (or export them as env
    vars), then:
 
    ```sh
@@ -114,14 +112,14 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
 | `AUTHORIZED_USERS`           | empty                                | Comma-separated Slack user IDs. Empty = inbound disabled. |
 | `PER_PROJECT_CHANNELS`       | `true`                               | Look up channel per session cwd in the channel map. |
 | `CHANNEL_PREFIX`             | empty                                | Reserved for auto-create flows; unused for now. |
-| `CHANNELS_FILE`              | `~/.agent-shell/slack-channels.json` | JSON map of cwd → channel ID. |
+| `CHANNELS_FILE`              | `~/.acp-hydra-slack/channels.json`   | JSON map of cwd → channel ID. |
 | `SHOW_TOOL_OUTPUT`           | `false`                              | If true, include tool body inline (still truncated). |
-| `UPLOAD_TRANSCRIPT_ON_END`   | `true`                               | When the multiplex socket closes, upload the thread's contents as a markdown file attached to the same thread. Set to `false` to disable. |
-| `HIDDEN_MESSAGES_DIR`        | `~/.agent-shell/slack`               | Where 🙈-hidden message originals go. |
-| `TRUNCATED_MESSAGES_DIR`     | `~/.agent-shell/slack-truncated`     | Where full tool outputs cache for 📖 expand. |
+| `UPLOAD_TRANSCRIPT_ON_END`   | `true`                               | When the hydra session closes, upload the thread's contents as a markdown file attached to the same thread. Set to `false` to disable. |
+| `HIDDEN_MESSAGES_DIR`        | `~/.acp-hydra-slack/hidden`          | Where 🙈-hidden message originals go. |
+| `TRUNCATED_MESSAGES_DIR`     | `~/.acp-hydra-slack/truncated`       | Where full tool outputs cache for 📖 expand. |
 | `TODO_DIRECTORY`             | `~/org/todo`                         | Where bookmark reactions write TODO files. |
 | `WEBSOCKET_STALE_THRESHOLD`  | `7200`                               | Seconds of socket silence before warning is logged. |
-| `BACKFILL_HISTORY`           | `false`                              | If true, replay the proxy's cached history into Slack on attach. Off by default — replays trip Slack rate limits and create noise. |
+| `BACKFILL_HISTORY`           | `false`                              | If true, replay hydra's cached history into Slack on attach. Off by default — replays trip Slack rate limits and create noise. |
 | `LIVE_QUIET_MS`              | `2000`                               | Inbound silence (ms) needed before considering an attach "live" when `BACKFILL_HISTORY=false`. |
 | `IMAGE_UPLOAD_RATE_LIMIT`    | `30`                                 | Reserved. |
 | `IMAGE_UPLOAD_RATE_WINDOW`   | `60`                                 | Reserved. |
@@ -161,11 +159,7 @@ Node test runner.
 
 ## Out of scope
 
-- Outbound image upload via file watcher (agent-shell-to-go has this;
-  the daemon doesn't yet).
-- Transcript upload at session end (agent-shell already writes
-  transcripts; the daemon doesn't duplicate the work).
-- mDNS service discovery for sockets across hosts.
+- Outbound image upload via file watcher.
 - True ACP-to-ACP bridging (different project).
 
 ## Status

@@ -4,9 +4,8 @@ import { logger } from "../util/log.js";
 
 const log = logger("hidden");
 
-// Mirrors agent-shell-to-go's hidden-message storage at
-// <dir>/<channel>/<ts>.txt — used to restore a message's original text after
-// the user removes the hide reaction.
+// Hidden-message storage at <dir>/<channel>/<ts>.txt — used to restore a
+// message's original text after the user removes the hide reaction.
 export class HiddenStore {
   constructor(private readonly baseDir: string) {}
 
