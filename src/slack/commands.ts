@@ -3,13 +3,13 @@ import { logger } from "../util/log.js";
 
 const log = logger("commands");
 
-export interface SpawnArgs {
+export interface SessionArgs {
   agentId: string | undefined;
   cwd: string | undefined;
   prompt: string | undefined;
 }
 
-// Parse the body of a "!spawn ..." message.
+// Parse the body of a "!session ..." message.
 //
 // Positional grammar (before any "--"):
 //   1. First token: if path-like (starts with /, ~, or ./), it's cwd;
@@ -19,17 +19,17 @@ export interface SpawnArgs {
 //   3. Everything remaining is the prompt.
 //
 // Anything after "--" is unconditionally the prompt (use this when the
-// prompt would otherwise be parsed as agentId, e.g. "!spawn -- what time").
+// prompt would otherwise be parsed as agentId, e.g. "!session -- what time").
 //
 // Examples:
-//   !spawn                            → all defaults (hydra fills in)
-//   !spawn ~/dev/foo                  → cwd=~/dev/foo
-//   !spawn opencode                    → agentId=opencode
-//   !spawn opencode ~/dev/foo         → both
-//   !spawn opencode ~/dev/foo fix it  → both + prompt
-//   !spawn ~/dev/foo fix it           → cwd + default agent + prompt
-//   !spawn -- fix it                  → defaults + prompt
-export function parseSpawnArgs(body: string): SpawnArgs {
+//   !session                            → all defaults (hydra fills in)
+//   !session ~/dev/foo                  → cwd=~/dev/foo
+//   !session opencode                    → agentId=opencode
+//   !session opencode ~/dev/foo         → both
+//   !session opencode ~/dev/foo fix it  → both + prompt
+//   !session ~/dev/foo fix it           → cwd + default agent + prompt
+//   !session -- fix it                  → defaults + prompt
+export function parseSessionArgs(body: string): SessionArgs {
   const trimmed = body.trim();
   if (trimmed.length === 0) {
     return { agentId: undefined, cwd: undefined, prompt: undefined };
@@ -96,16 +96,16 @@ function looksLikeAgentId(s: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(s);
 }
 
-export interface SpawnResult {
+export interface SessionResult {
   sessionId: string;
   agentId: string;
   cwd: string;
 }
 
-export async function spawnSession(
+export async function createSession(
   config: Config,
-  args: SpawnArgs,
-): Promise<SpawnResult> {
+  args: SessionArgs,
+): Promise<SessionResult> {
   const body: Record<string, unknown> = {};
   if (args.agentId !== undefined) {
     body.agentId = args.agentId;
@@ -125,9 +125,9 @@ export async function spawnSession(
     const text = await r.text().catch(() => "");
     throw new Error(`hydra POST /v1/sessions ${r.status}: ${text}`);
   }
-  const result = (await r.json()) as SpawnResult;
+  const result = (await r.json()) as SessionResult;
   log.info(
-    `spawned session ${result.sessionId} agent=${result.agentId} cwd=${result.cwd}`,
+    `created session ${result.sessionId} agent=${result.agentId} cwd=${result.cwd}`,
   );
   return result;
 }

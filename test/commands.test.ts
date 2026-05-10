@@ -1,9 +1,9 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { parseSpawnArgs } from "../src/slack/commands.js";
+import { parseSessionArgs } from "../src/slack/commands.js";
 
 test("empty body uses all defaults", () => {
-  assert.deepEqual(parseSpawnArgs(""), {
+  assert.deepEqual(parseSessionArgs(""), {
     agentId: undefined,
     cwd: undefined,
     prompt: undefined,
@@ -11,7 +11,7 @@ test("empty body uses all defaults", () => {
 });
 
 test("path-only argument is parsed as cwd", () => {
-  assert.deepEqual(parseSpawnArgs(" ~/dev/foo "), {
+  assert.deepEqual(parseSessionArgs(" ~/dev/foo "), {
     agentId: undefined,
     cwd: "~/dev/foo",
     prompt: undefined,
@@ -19,7 +19,7 @@ test("path-only argument is parsed as cwd", () => {
 });
 
 test("bare-word-only argument is parsed as agentId", () => {
-  assert.deepEqual(parseSpawnArgs("opencode"), {
+  assert.deepEqual(parseSessionArgs("opencode"), {
     agentId: "opencode",
     cwd: undefined,
     prompt: undefined,
@@ -27,7 +27,7 @@ test("bare-word-only argument is parsed as agentId", () => {
 });
 
 test("agent followed by cwd", () => {
-  assert.deepEqual(parseSpawnArgs("opencode ~/dev/foo"), {
+  assert.deepEqual(parseSessionArgs("opencode ~/dev/foo"), {
     agentId: "opencode",
     cwd: "~/dev/foo",
     prompt: undefined,
@@ -35,7 +35,7 @@ test("agent followed by cwd", () => {
 });
 
 test("agent + cwd + prompt without --", () => {
-  assert.deepEqual(parseSpawnArgs("opencode ~/dev/foo fix the bug"), {
+  assert.deepEqual(parseSessionArgs("opencode ~/dev/foo fix the bug"), {
     agentId: "opencode",
     cwd: "~/dev/foo",
     prompt: "fix the bug",
@@ -43,7 +43,7 @@ test("agent + cwd + prompt without --", () => {
 });
 
 test("cwd + default agent + prompt", () => {
-  assert.deepEqual(parseSpawnArgs("~/dev/foo fix the bug"), {
+  assert.deepEqual(parseSessionArgs("~/dev/foo fix the bug"), {
     agentId: undefined,
     cwd: "~/dev/foo",
     prompt: "fix the bug",
@@ -51,7 +51,7 @@ test("cwd + default agent + prompt", () => {
 });
 
 test("-- forces everything after as prompt (defaults + prompt)", () => {
-  assert.deepEqual(parseSpawnArgs("-- fix the bug"), {
+  assert.deepEqual(parseSessionArgs("-- fix the bug"), {
     agentId: undefined,
     cwd: undefined,
     prompt: "fix the bug",
@@ -59,7 +59,7 @@ test("-- forces everything after as prompt (defaults + prompt)", () => {
 });
 
 test("-- after a cwd preserves the cwd and treats rest as prompt", () => {
-  assert.deepEqual(parseSpawnArgs("~/dev/foo -- fix the bug"), {
+  assert.deepEqual(parseSessionArgs("~/dev/foo -- fix the bug"), {
     agentId: undefined,
     cwd: "~/dev/foo",
     prompt: "fix the bug",
@@ -67,7 +67,7 @@ test("-- after a cwd preserves the cwd and treats rest as prompt", () => {
 });
 
 test("-- with empty prompt clears prompt to undefined", () => {
-  assert.deepEqual(parseSpawnArgs("opencode --"), {
+  assert.deepEqual(parseSessionArgs("opencode --"), {
     agentId: "opencode",
     cwd: undefined,
     prompt: undefined,
@@ -75,7 +75,7 @@ test("-- with empty prompt clears prompt to undefined", () => {
 });
 
 test("absolute path is treated as cwd", () => {
-  assert.deepEqual(parseSpawnArgs("/var/tmp/work"), {
+  assert.deepEqual(parseSessionArgs("/var/tmp/work"), {
     agentId: undefined,
     cwd: "/var/tmp/work",
     prompt: undefined,
@@ -83,7 +83,7 @@ test("absolute path is treated as cwd", () => {
 });
 
 test("./relative path is treated as cwd", () => {
-  assert.deepEqual(parseSpawnArgs("./scratch"), {
+  assert.deepEqual(parseSessionArgs("./scratch"), {
     agentId: undefined,
     cwd: "./scratch",
     prompt: undefined,
@@ -93,7 +93,7 @@ test("./relative path is treated as cwd", () => {
 test("a token that looks neither like a path nor a known agent id starts the prompt", () => {
   // "what" would be matched as agentId here (it's word-shaped); use --
   // for the unambiguous prompt-only form. This is the documented quirk.
-  assert.deepEqual(parseSpawnArgs("-- what is the time"), {
+  assert.deepEqual(parseSessionArgs("-- what is the time"), {
     agentId: undefined,
     cwd: undefined,
     prompt: "what is the time",

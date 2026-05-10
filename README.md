@@ -176,28 +176,29 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
 |----------------------------------|------------------|--------|
 | `!debug`                         | inside a thread  | Replies with the session's debug info (sessionId, channel, ws state, last-frame time). |
 | `!agents`                        | anywhere         | Lists agents installed in hydra's registry (`GET /v1/agents`). |
-| `!spawn [agent] [cwd] [prompt…]` | anywhere         | Asks hydra to spawn a fresh ACP session (`POST /v1/sessions`). Both positionals are optional — hydra falls back to `defaultAgent` and `defaultCwd` from `~/.acp-hydra/config.json` (which itself defaults to `claude-code` and `~`). |
+| `!session [agent] [cwd] [prompt…]` | anywhere         | Asks hydra to create a fresh ACP session (`POST /v1/sessions`). Both positionals are optional — hydra falls back to `defaultAgent` and `defaultCwd` from `~/.acp-hydra/config.json` (which itself defaults to `claude-code` and `~`). |
+| `!title [text]`                  | inside a thread  | Shortcut for hydra's `/hydra title` slash command. With an argument, sets the session title directly; without one, asks the agent to retitle. |
 
-`!spawn` parsing rules:
+`!session` parsing rules:
 
 - The first token, if path-like (`/…`, `~…`, `./…`), is the cwd; otherwise it's the agentId.
 - The second token, only if the first was an agentId, may be the cwd.
 - Anything remaining is the prompt sent as the session's first user message.
-- A `--` separator forces everything after it to be the prompt — useful when the prompt itself starts with a word that would otherwise be parsed as the agent (e.g. `!spawn -- what time is it?`).
+- A `--` separator forces everything after it to be the prompt — useful when the prompt itself starts with a word that would otherwise be parsed as the agent (e.g. `!session -- what time is it?`).
 
 Examples:
 
 ```
-!spawn                                  # default agent + default cwd, no first prompt
-!spawn ~/dev/foo                        # default agent in ~/dev/foo
-!spawn opencode                         # opencode in default cwd
-!spawn opencode ~/dev/foo               # both
-!spawn opencode ~/dev/foo fix the bug   # both + first prompt
-!spawn ~/dev/foo fix the bug            # cwd + default agent + first prompt
-!spawn -- what time is it?              # all defaults + first prompt
+!session                                  # default agent + default cwd, no first prompt
+!session ~/dev/foo                        # default agent in ~/dev/foo
+!session opencode                         # opencode in default cwd
+!session opencode ~/dev/foo               # both
+!session opencode ~/dev/foo fix the bug   # both + first prompt
+!session ~/dev/foo fix the bug            # cwd + default agent + first prompt
+!session -- what time is it?              # all defaults + first prompt
 ```
 
-The bot reacts ✅ on the spawn message and replies with the resolved agent/cwd. The new thread appears in whichever channel the resolved cwd maps to (per `PER_PROJECT_CHANNELS` + `CHANNELS_FILE`), which may differ from where `!spawn` was posted.
+The bot reacts ✅ on the command message and replies with the resolved agent/cwd. The new thread appears in whichever channel the resolved cwd maps to (per `PER_PROJECT_CHANNELS` + `CHANNELS_FILE`), which may differ from where `!session` was posted.
 
 ## Tests
 

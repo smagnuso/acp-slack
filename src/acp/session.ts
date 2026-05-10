@@ -173,7 +173,7 @@ export interface SessionBridgeOptions {
     agentId: string | undefined;
   };
   // Messages buffered while the bridge wasn't yet up — typed in slack
-  // against a cold thread (resurrection path) or queued by !spawn for
+  // against a cold thread (resurrection path) or queued by !session for
   // a session whose bridge hadn't booted yet. Forwarded to the agent
   // in order via sendUserPrompt as soon as the bridge attach opens
   // and the slack thread is ready.

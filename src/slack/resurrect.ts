@@ -16,7 +16,7 @@ export interface PendingMessage {
 }
 
 // Messages waiting for their session's bridge to come up. Filled by
-// `!spawn` (with the optional initial prompt) and by the resurrection
+// `!session` (with the optional initial prompt) and by the resurrection
 // path in app.message. Drained by index.ts in onAdd, where each entry
 // is forwarded to the freshly-attached bridge once it has opened the
 // thread.

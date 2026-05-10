@@ -1,7 +1,7 @@
 import bolt from "@slack/bolt";
 import type { Config } from "../config.js";
 import { logger } from "../util/log.js";
-import { listAgents, parseSpawnArgs, spawnSession } from "./commands.js";
+import { listAgents, parseSessionArgs, createSession } from "./commands.js";
 import { reactionAction } from "./reaction-map.js";
 import { threadRegistry } from "./registry.js";
 import {
@@ -75,8 +75,8 @@ export function createSlackApp(config: Config): SlackApp {
       return;
     }
     const rawText = (m.text ?? "").trim();
-    if (rawText.startsWith("!spawn")) {
-      await handleSpawn(app, config, rawText, m.channel, m.ts);
+    if (rawText.startsWith("!session")) {
+      await handleSessionCommand(app, config, rawText, m.channel, m.ts);
       return;
     }
     if (rawText === "!agents") {
@@ -393,24 +393,24 @@ async function tryLookupByMessage(
   }
 }
 
-async function handleSpawn(
+async function handleSessionCommand(
   app: bolt.App,
   config: Config,
   rawText: string,
   channel: string,
   ts: string,
 ): Promise<void> {
-  const body = rawText.slice("!spawn".length);
-  const args = parseSpawnArgs(body);
+  const body = rawText.slice("!session".length);
+  const args = parseSessionArgs(body);
   let result;
   try {
-    result = await spawnSession(config, args);
+    result = await createSession(config, args);
   } catch (err) {
-    log.warn(`spawn failed: ${(err as Error).message}`);
+    log.warn(`session creation failed: ${(err as Error).message}`);
     await app.client.chat.postMessage({
       channel,
       thread_ts: ts,
-      text: `:warning: spawn failed: ${(err as Error).message}`,
+      text: `:warning: session creation failed: ${(err as Error).message}`,
     });
     return;
   }
@@ -428,7 +428,7 @@ async function handleSpawn(
     channel,
     thread_ts: ts,
     text:
-      `:rocket: spawning \`${result.agentId}\` in \`${result.cwd}\` ` +
+      `:rocket: starting \`${result.agentId}\` in \`${result.cwd}\` ` +
       `(session \`${shortId}\`); thread will appear once the agent is ready` +
       (args.prompt ? "; first prompt queued" : ""),
   });
