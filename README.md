@@ -114,52 +114,52 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
 
 ## Configuration keys
 
-| Key                          | Default                              | Notes |
-|------------------------------|--------------------------------------|-------|
-| `SLACK_BOT_TOKEN`            | (required)                           | `xoxb-...` |
-| `SLACK_APP_TOKEN`            | (required)                           | `xapp-...` |
-| `SLACK_CHANNEL_ID`           | none                                 | Default channel when per-project disabled or no mapping. |
-| `AUTHORIZED_USERS`           | empty                                | Comma-separated Slack user IDs. Empty = inbound disabled. |
-| `PER_PROJECT_CHANNELS`       | `true`                               | Look up channel per session cwd in the channel map. |
-| `CHANNEL_PREFIX`             | empty                                | Reserved for auto-create flows; unused for now. |
-| `CHANNELS_FILE`              | `~/.acp-hydra-slack/channels.json`   | JSON map of cwd → channel ID. |
-| `SHOW_TOOL_OUTPUT`           | `false`                              | If true, include tool body inline (still truncated). |
-| `UPLOAD_TRANSCRIPT_ON_END`   | `true`                               | When the hydra session closes, upload the thread's contents as a markdown file attached to the same thread. Set to `false` to disable. |
-| `HIDDEN_MESSAGES_DIR`        | `~/.acp-hydra-slack/hidden`          | Where 🙈-hidden message originals go. |
-| `TRUNCATED_MESSAGES_DIR`     | `~/.acp-hydra-slack/truncated`       | Where full tool outputs cache for 📖 expand. |
-| `TODO_DIRECTORY`             | `~/org/todo`                         | Where bookmark reactions write TODO files. |
-| `WEBSOCKET_STALE_THRESHOLD`  | `7200`                               | Seconds of socket silence before warning is logged. |
-| `BACKFILL_HISTORY`           | `false`                              | If true, replay hydra's cached history into Slack on attach. Off by default — replays trip Slack rate limits and create noise. |
-| `LIVE_QUIET_MS`              | `2000`                               | Inbound silence (ms) needed before considering an attach "live" when `BACKFILL_HISTORY=false`. |
-| `IMAGE_UPLOAD_RATE_LIMIT`    | `30`                                 | Reserved. |
-| `IMAGE_UPLOAD_RATE_WINDOW`   | `60`                                 | Reserved. |
-| `HYDRA_DAEMON_URL`           | `http://127.0.0.1:8765`              | Where to reach the hydra daemon. Set automatically when run as a hydra extension. |
-| `HYDRA_WS_URL`               | derived from `HYDRA_DAEMON_URL`      | WebSocket endpoint for ACP attach. Defaults to `ws[s]://<host>:<port>/acp`. |
-| `HYDRA_TOKEN`                | (required)                           | Bearer token for hydra. Set automatically when run as a hydra extension. |
-| `HYDRA_POLL_INTERVAL_MS`     | `2000`                               | How often to poll hydra for session changes. |
-| `DEBUG`                      | `false`                              | Verbose logging. |
+| Key                         | Default                            | Notes |
+|-----------------------------|------------------------------------|-------|
+| `SLACK_BOT_TOKEN`           | (required)                         | `xoxb-...` |
+| `SLACK_APP_TOKEN`           | (required)                         | `xapp-...` |
+| `SLACK_CHANNEL_ID`          | none                               | Default channel when per-project disabled or no mapping. |
+| `AUTHORIZED_USERS`          | empty                              | Comma-separated Slack user IDs. Empty = inbound disabled. |
+| `PER_PROJECT_CHANNELS`      | `true`                             | Look up channel per session cwd in the channel map. |
+| `CHANNEL_PREFIX`            | empty                              | Reserved for auto-create flows; unused for now. |
+| `CHANNELS_FILE`             | `~/.acp-hydra-slack/channels.json` | JSON map of cwd → channel ID. |
+| `SHOW_TOOL_OUTPUT`          | `false`                            | If true, include tool body inline (still truncated). |
+| `UPLOAD_TRANSCRIPT_ON_END`  | `true`                             | When the hydra session closes, upload the thread's contents as a markdown file attached to the same thread. Set to `false` to disable. |
+| `HIDDEN_MESSAGES_DIR`       | `~/.acp-hydra-slack/hidden`        | Where 🙈-hidden message originals go. |
+| `TRUNCATED_MESSAGES_DIR`    | `~/.acp-hydra-slack/truncated`     | Where full tool outputs cache for 📖 expand. |
+| `TODO_DIRECTORY`            | `~/org/todo`                       | Where bookmark reactions write TODO files. |
+| `WEBSOCKET_STALE_THRESHOLD` | `7200`                             | Seconds of socket silence before warning is logged. |
+| `BACKFILL_HISTORY`          | `false`                            | If true, replay hydra's cached history into Slack on attach. Off by default — replays trip Slack rate limits and create noise. |
+| `LIVE_QUIET_MS`             | `2000`                             | Inbound silence (ms) needed before considering an attach "live" when `BACKFILL_HISTORY=false`. |
+| `IMAGE_UPLOAD_RATE_LIMIT`   | `30`                               | Reserved. |
+| `IMAGE_UPLOAD_RATE_WINDOW`  | `60`                               | Reserved. |
+| `HYDRA_DAEMON_URL`          | `http://127.0.0.1:8765`            | Where to reach the hydra daemon. Set automatically when run as a hydra extension. |
+| `HYDRA_WS_URL`              | derived from `HYDRA_DAEMON_URL`    | WebSocket endpoint for ACP attach. Defaults to `ws[s]://<host>:<port>/acp`. |
+| `HYDRA_TOKEN`               | (required)                         | Bearer token for hydra. Set automatically when run as a hydra extension. |
+| `HYDRA_POLL_INTERVAL_MS`    | `2000`                             | How often to poll hydra for session changes. |
+| `DEBUG`                     | `false`                            | Verbose logging. |
 
 ## Reactions
 
-| Reaction                                     | Action |
-|---------------------------------------------|--------|
-| `:white_check_mark:` / `:+1:` / `:star:` | Approve once (picks the agent's `allow_once` option) |
-| `:unlock:`                                  | Approve always (picks `allow_always` when offered, otherwise falls back to `allow_once`) |
-| `:x:` / `:-1:`                              | Deny |
+| Reaction                                                                         | Action |
+|----------------------------------------------------------------------------------|--------|
+| `:white_check_mark:` / `:+1:` / `:star:`                                         | Approve once (picks the agent's `allow_once` option) |
+| `:unlock:`                                                                       | Approve always (picks `allow_always` when offered, otherwise falls back to `allow_once`) |
+| `:x:` / `:-1:`                                                                   | Deny |
 | `:stop_sign:` / `:octagonal_sign:` / `:no_entry:` / `:no_entry_sign:` / `:stop:` | Cancel — react on the active turn spinner to send `session/cancel` to the agent. Ignored on any other message. |
-| `:see_no_evil:` / `:no_bell:`               | Hide message (toggle to restore) |
-| `:eyes:`                                    | Expand truncated tool output |
-| `:book:` / `:open_book:`                    | Expand full tool output |
-| `:heart:` (and friends)                     | Forward as positive feedback to agent |
-| `:bookmark:`                                | Save message text as an org TODO |
+| `:see_no_evil:` / `:no_bell:`                                                    | Hide message (toggle to restore) |
+| `:eyes:`                                                                         | Expand truncated tool output |
+| `:book:` / `:open_book:`                                                         | Expand full tool output |
+| `:heart:` (and friends)                                                          | Forward as positive feedback to agent |
+| `:bookmark:`                                                                     | Save message text as an org TODO |
 
 ## Slash-style commands
 
-| Command | Where | Effect |
-|---------|-------|--------|
-| `!debug` | inside a thread | Replies with the session's debug info (sessionId, channel, ws state, last-frame time). |
-| `!agents` | anywhere | Lists agents installed in hydra's registry (`GET /v1/agents`). |
-| `!spawn [agent] [cwd] [prompt…]` | anywhere | Asks hydra to spawn a fresh ACP session (`POST /v1/sessions`). Both positionals are optional — hydra falls back to `defaultAgent` and `defaultCwd` from `~/.acp-hydra/config.json` (which itself defaults to `claude-code` and `~`). |
+| Command                          | Where            | Effect |
+|----------------------------------|------------------|--------|
+| `!debug`                         | inside a thread  | Replies with the session's debug info (sessionId, channel, ws state, last-frame time). |
+| `!agents`                        | anywhere         | Lists agents installed in hydra's registry (`GET /v1/agents`). |
+| `!spawn [agent] [cwd] [prompt…]` | anywhere         | Asks hydra to spawn a fresh ACP session (`POST /v1/sessions`). Both positionals are optional — hydra falls back to `defaultAgent` and `defaultCwd` from `~/.acp-hydra/config.json` (which itself defaults to `claude-code` and `~`). |
 
 `!spawn` parsing rules:
 
