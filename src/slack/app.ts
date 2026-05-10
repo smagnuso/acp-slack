@@ -153,13 +153,26 @@ export function createSlackApp(config: Config): SlackApp {
       });
       return;
     }
+    // !title [new title] — shortcut for hydra's /hydra title slash command.
+    // No arg → ask the agent to retitle. With an arg → set directly. Either
+    // way the daemon intercepts the prompt and broadcasts a session_info_update,
+    // so the new title shows up in every attached client.
+    const isTitleCmd = text.startsWith("!title");
+    const forwardedText = isTitleCmd
+      ? "/hydra title" + text.slice("!title".length)
+      : text;
+    if (isTitleCmd) {
+      await app.client.reactions
+        .add({ channel: m.channel, timestamp: m.ts, name: "label" })
+        .catch(() => undefined);
+    }
     let routed = false;
     let lastError: string | undefined;
     for (const candidate of candidates) {
       try {
         await candidate.bridge.sendUserPrompt(
           candidate.sessionId,
-          text,
+          forwardedText,
           imageBlocks,
         );
         threadRegistry.promote(candidate.bridge, m.channel, m.thread_ts);
