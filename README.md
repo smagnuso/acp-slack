@@ -71,25 +71,35 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
    npm run build
    ```
 
-4. **Run as a hydra extension (recommended).** Add an entry to your
-   `~/.acp-hydra/config.json`:
+4. **Run as a hydra extension (recommended).** Register the extension
+   with hydra:
+
+   ```sh
+   acp-hydra extensions add acp-hydra-slack \
+     --command node \
+     --args ~/dev/acp-hydra-slack/dist/index.js
+   ```
+
+   That writes the equivalent entry into `~/.acp-hydra/config.json`:
 
    ```json
    {
-     "extensions": [
-       {
-         "name": "acp-hydra-slack",
-         "command": ["node", "/home/you/dev/acp-hydra-slack/dist/index.js"],
+     "extensions": {
+       "acp-hydra-slack": {
+         "command": ["node"],
+         "args": ["/home/you/dev/acp-hydra-slack/dist/index.js"],
          "enabled": true
        }
-     ]
+     }
    }
    ```
 
    On `acp-hydra daemon start`, hydra spawns acp-hydra-slack with these env
    vars set: `ACP_HYDRA_DAEMON_URL`, `ACP_HYDRA_TOKEN`, `ACP_HYDRA_WS_URL`.
    acp-hydra-slack uses them to discover and attach to sessions. Stdout/stderr
-   land in `~/.acp-hydra/extensions/acp-hydra-slack.log`.
+   land in `~/.acp-hydra/extensions/acp-hydra-slack.log`. Lifecycle is managed
+   with `acp-hydra extensions start|stop|restart acp-hydra-slack` and
+   `acp-hydra extensions logs acp-hydra-slack -f` to tail.
 
 5. **Run standalone (alternative).** Set `HYDRA_DAEMON_URL` and
    `HYDRA_TOKEN` in `~/.acp-hydra-slack.conf` (or export them as env
