@@ -63,16 +63,33 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
    DEBUG=false
    ```
 
-3. **Build.**
+3. **Install or build.**
+
+   From npm (recommended once published):
 
    ```sh
+   npm install -g @acp-hydra/slack
+   ```
+
+   This drops an `acp-hydra-slack` binary on your PATH.
+
+   Or from source:
+
+   ```sh
+   git clone https://github.com/smagnuson/acp-hydra-slack.git ~/dev/acp-hydra-slack
    cd ~/dev/acp-hydra-slack
    npm install
    npm run build
    ```
 
 4. **Run as a hydra extension (recommended).** Register the extension
-   with hydra:
+   with hydra. If installed via npm:
+
+   ```sh
+   acp-hydra extensions add acp-hydra-slack --command acp-hydra-slack
+   ```
+
+   Or pointed at a local build:
 
    ```sh
    acp-hydra extensions add acp-hydra-slack \
