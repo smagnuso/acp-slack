@@ -456,6 +456,15 @@ export class SessionBridge {
         break;
       }
       case "user_message_chunk": {
+        // Hydra emits a marked user_message_chunk alongside prompt_received
+        // for clients that don't implement RFD #533. We render via the
+        // prompt_received arm below, so drop the compat copy to avoid
+        // double-rendering.
+        const meta = (update._meta ?? {}) as Record<string, unknown>;
+        const hydraMeta = (meta["acp-hydra"] ?? {}) as Record<string, unknown>;
+        if (hydraMeta.compatFor === "prompt_received") {
+          break;
+        }
         const content = (update.content ?? {}) as Record<string, unknown>;
         const text = (content.text ?? "") as string;
         if (text.length > 0) {
