@@ -269,12 +269,32 @@ export function createSlackApp(config: Config): SlackApp {
   let watchdogTimer: NodeJS.Timeout | undefined;
   let lastConnectedAt = 0;
   let smConnected = false;
+  let stopping = false;
 
   return {
     app,
     client: app.client,
     async start() {
-      await app.start();
+      // Initial connect with internal retry. Bolt's SocketModeClient
+      // throws if apps.connections.open fails on the first try, so a
+      // network-down spawn would otherwise crash the process and leave
+      // hydra to backoff-respawn us indefinitely. Stay in-process and
+      // retry every 10s — recovers as soon as the network is back
+      // without churning through hydra's process spawns.
+      while (!stopping) {
+        try {
+          await app.start();
+          break;
+        } catch (err) {
+          log.warn(
+            `slack start failed: ${(err as Error).message}; retrying in 10s`,
+          );
+          await new Promise<void>((resolve) => setTimeout(resolve, 10_000));
+        }
+      }
+      if (stopping) {
+        return;
+      }
       log.info("Slack Socket Mode connected");
       lastConnectedAt = Date.now();
       smConnected = true;
@@ -311,6 +331,7 @@ export function createSlackApp(config: Config): SlackApp {
       }
     },
     async stop() {
+      stopping = true;
       if (watchdogTimer) {
         clearInterval(watchdogTimer);
         watchdogTimer = undefined;
