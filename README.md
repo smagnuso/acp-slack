@@ -31,9 +31,9 @@ REST API for active sessions, and attaches over WSS to each one.
 
 The daemon polls `GET /v1/sessions` on hydra (default every 2s) and, for
 each new session id it sees, opens a WebSocket to hydra's `/acp`
-endpoint and sends `session/attach` with `role: "controller"`. Hydra
-replays the session's history on attach, then live notifications flow
-through. Slack-side prompts are forwarded back via `session/prompt`.
+endpoint and sends `session/attach`. Hydra replays the session's history
+on attach, then live notifications flow through. Slack-side prompts are
+forwarded back via `session/prompt`.
 
 ## Setup
 

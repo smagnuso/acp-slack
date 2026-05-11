@@ -24,10 +24,6 @@ export interface AttachOptions {
   // Optional initialize/clientCapabilities; sent on connect.
   clientCapabilities?: Record<string, unknown>;
   protocolVersion?: number;
-  // Role to claim on session/attach. hydra-acp-slack defaults to controller so it
-  // can post prompts and respond to permission requests; an observer-only
-  // mirror can be configured per channel later.
-  role?: "controller" | "observer";
 }
 
 export interface AttachEvents {
@@ -240,7 +236,6 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
         _meta?: Record<string, unknown>;
       }>("session/attach", {
         sessionId: this.opts.sessionId,
-        role: this.opts.role ?? "controller",
         historyPolicy: "full",
         clientInfo: { name: "hydra-acp-slack", version: "0.1.0" },
       });
