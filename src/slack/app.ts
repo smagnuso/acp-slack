@@ -1,7 +1,13 @@
 import bolt from "@slack/bolt";
 import type { Config } from "../config.js";
 import { logger } from "../util/log.js";
-import { listAgents, parseSessionArgs, createSession } from "./commands.js";
+import {
+  listAgents,
+  matchKnownCommand,
+  parseBangCommand,
+  parseSessionArgs,
+  createSession,
+} from "./commands.js";
 import { reactionAction } from "./reaction-map.js";
 import { threadRegistry } from "./registry.js";
 import {
@@ -11,6 +17,15 @@ import {
 } from "./resurrect.js";
 
 const log = logger("slack");
+
+// Optional per-command override for the visual ack we drop on a
+// forwarded bang. Keyed by the matched slash-form name (longest-prefix
+// match from the discovered command set). Unmapped commands get the
+// generic :gear: — new commands work in Slack with no entry here.
+const BANG_VERB_REACTIONS: Record<string, string> = {
+  "/hydra title": "label",
+  "/hydra switch": "twisted_rightwards_arrows",
+};
 
 export interface SlackApp {
   app: bolt.App;
@@ -153,17 +168,31 @@ export function createSlackApp(config: Config): SlackApp {
       });
       return;
     }
-    // !title [new title] — shortcut for hydra's /hydra title slash command.
-    // No arg → ask the agent to retitle. With an arg → set directly. Either
-    // way the daemon intercepts the prompt and broadcasts a session_info_update,
-    // so the new title shows up in every attached client.
-    const isTitleCmd = text.startsWith("!title");
-    const forwardedText = isTitleCmd
-      ? "/hydra title" + text.slice("!title".length)
-      : text;
-    if (isTitleCmd) {
+    // Strict-mirror bang routing: `!foo bar` → `/foo bar`. We look up
+    // the candidate against the daemon-advertised command set
+    // (available_commands_update) and only forward when it matches a
+    // known command. Locally owned bangs (!debug, !session, !agents)
+    // are filtered out by parseBangCommand.
+    const bang = parseBangCommand(text);
+    let forwardedText = text;
+    if (bang) {
+      const known = entry.bridge.availableCommands(entry.sessionId);
+      const matched = matchKnownCommand(bang.slash, known.keys());
+      if (!matched) {
+        await postUnknownCommandReply(
+          app,
+          m.channel,
+          m.ts,
+          m.thread_ts,
+          bang.slash,
+          known,
+        );
+        return;
+      }
+      forwardedText = bang.slash;
+      const emoji = BANG_VERB_REACTIONS[matched] ?? "gear";
       await app.client.reactions
-        .add({ channel: m.channel, timestamp: m.ts, name: "label" })
+        .add({ channel: m.channel, timestamp: m.ts, name: emoji })
         .catch(() => undefined);
     }
     let routed = false;
@@ -365,6 +394,35 @@ async function downloadAsBase64(url: string, botToken: string): Promise<string> 
   }
   const buf = Buffer.from(await res.arrayBuffer());
   return buf.toString("base64");
+}
+
+// Reply when a user typed a `!<verb>` that doesn't match anything the
+// daemon has advertised (typo, command not yet wired, agent that
+// doesn't advertise its commands, etc.). Drops a :grey_question:
+// reaction and lists the known commands in the thread.
+async function postUnknownCommandReply(
+  app: bolt.App,
+  channel: string,
+  ts: string,
+  threadTs: string | undefined,
+  slash: string,
+  known: ReadonlyMap<string, string | undefined>,
+): Promise<void> {
+  await app.client.reactions
+    .add({ channel, timestamp: ts, name: "grey_question" })
+    .catch(() => undefined);
+  const names = [...known.keys()].sort();
+  const list =
+    names.length === 0
+      ? "_(no commands advertised yet — try again after the agent emits its command list)_"
+      : names.map((n) => `• \`!${n.slice(1)}\``).join("\n");
+  await app.client.chat
+    .postMessage({
+      channel,
+      ...(threadTs ? { thread_ts: threadTs } : {}),
+      text: `:grey_question: unknown command \`!${slash.slice(1)}\`\nKnown:\n${list}`,
+    })
+    .catch(() => undefined);
 }
 
 // When the reaction's target is a message inside a thread (not the parent),

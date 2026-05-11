@@ -1,6 +1,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { parseSessionArgs } from "../src/slack/commands.js";
+import {
+  matchKnownCommand,
+  parseBangCommand,
+  parseSessionArgs,
+} from "../src/slack/commands.js";
 
 test("empty body uses all defaults", () => {
   assert.deepEqual(parseSessionArgs(""), {
@@ -98,4 +102,73 @@ test("a token that looks neither like a path nor a known agent id starts the pro
     cwd: undefined,
     prompt: "what is the time",
   });
+});
+
+test("parseBangCommand: !hydra title strict-mirrors to /hydra title", () => {
+  assert.deepEqual(parseBangCommand("!hydra title"), {
+    slash: "/hydra title",
+    leadVerb: "hydra",
+  });
+});
+
+test("parseBangCommand: preserves args after the verb", () => {
+  assert.deepEqual(parseBangCommand("!hydra switch claude-code"), {
+    slash: "/hydra switch claude-code",
+    leadVerb: "hydra",
+  });
+});
+
+test("parseBangCommand: agent-style single-word verbs work", () => {
+  assert.deepEqual(parseBangCommand("!create_plan write a function"), {
+    slash: "/create_plan write a function",
+    leadVerb: "create_plan",
+  });
+});
+
+test("parseBangCommand: returns null for plain text", () => {
+  assert.equal(parseBangCommand("hello world"), null);
+});
+
+test("parseBangCommand: returns null for reserved local bangs", () => {
+  assert.equal(parseBangCommand("!debug"), null);
+  assert.equal(parseBangCommand("!session foo"), null);
+  assert.equal(parseBangCommand("!agents"), null);
+});
+
+test("parseBangCommand: rejects malformed bangs", () => {
+  assert.equal(parseBangCommand("!"), null);
+  assert.equal(parseBangCommand("!!"), null);
+  assert.equal(parseBangCommand("!1bad"), null);
+  assert.equal(parseBangCommand("!hydra:title"), null);
+});
+
+test("matchKnownCommand: exact match", () => {
+  const known = ["/hydra title", "/hydra switch"];
+  assert.equal(matchKnownCommand("/hydra title", known), "/hydra title");
+});
+
+test("matchKnownCommand: prefix match consumes args after a space", () => {
+  const known = ["/hydra title", "/hydra switch"];
+  assert.equal(
+    matchKnownCommand("/hydra switch claude-code", known),
+    "/hydra switch",
+  );
+});
+
+test("matchKnownCommand: longest matching prefix wins", () => {
+  // If both `/hydra` and `/hydra switch` were advertised, the more
+  // specific one should win for "/hydra switch claude".
+  const known = ["/hydra", "/hydra switch"];
+  assert.equal(
+    matchKnownCommand("/hydra switch claude", known),
+    "/hydra switch",
+  );
+});
+
+test("matchKnownCommand: no match returns null", () => {
+  const known = ["/hydra title", "/hydra switch"];
+  assert.equal(matchKnownCommand("/nope", known), null);
+  // Prefix without a separator after it (would match a different verb)
+  // doesn't count.
+  assert.equal(matchKnownCommand("/hydra-title", known), null);
 });

@@ -139,6 +139,65 @@ export interface AgentEntry {
   description: string | undefined;
 }
 
+// Bangs the slack bot owns locally — must NOT be forwarded to hydra as
+// slash commands. Everything else matching `!<verb>` is treated as a
+// slash command (strict mirror: `!foo bar` → `/foo bar`) and routed
+// against the daemon's discovered command set.
+const LOCAL_BANGS = new Set(["debug", "session", "agents"]);
+
+export interface BangCommand {
+  // Strict-mirror slash form: `!foo bar` → `/foo bar`. Routing then looks
+  // this up (with longest-prefix matching for multi-word verbs like
+  // `/hydra title`) against the daemon-advertised command set.
+  slash: string;
+  // The leading word — used only to short-circuit local bangs. Real
+  // routing happens on `slash`.
+  leadVerb: string;
+}
+
+// Detect a `!<rest>` bang. Returns null for plain text, reserved local
+// bangs (handled separately by the slack bot), or malformed `!`-prefixed
+// tokens (e.g. `!!`, `!1bad`).
+export function parseBangCommand(text: string): BangCommand | null {
+  if (!text.startsWith("!")) {
+    return null;
+  }
+  const m = text.match(/^!([A-Za-z][A-Za-z0-9_-]*(?:\s[\s\S]*)?)$/);
+  if (!m) {
+    return null;
+  }
+  const rest = (m[1] ?? "").trimEnd();
+  if (rest.length === 0) {
+    return null;
+  }
+  const space = rest.indexOf(" ");
+  const leadVerb = space === -1 ? rest : rest.slice(0, space);
+  if (LOCAL_BANGS.has(leadVerb)) {
+    return null;
+  }
+  return { slash: `/${rest}`, leadVerb };
+}
+
+// Find the longest known command name that matches `slash` either by
+// exact equality or as a prefix followed by whitespace. Returns the
+// matched name (e.g. "/hydra switch") so callers can render
+// per-command UX (reaction emoji, error messages); the forward text is
+// the original `slash`.
+export function matchKnownCommand(
+  slash: string,
+  known: Iterable<string>,
+): string | null {
+  let best: string | null = null;
+  for (const name of known) {
+    if (slash === name || slash.startsWith(name + " ")) {
+      if (best === null || name.length > best.length) {
+        best = name;
+      }
+    }
+  }
+  return best;
+}
+
 export async function listAgents(config: Config): Promise<AgentEntry[]> {
   const r = await fetch(`${config.hydraDaemonUrl}/v1/agents`, {
     headers: { Authorization: `Bearer ${config.hydraToken}` },

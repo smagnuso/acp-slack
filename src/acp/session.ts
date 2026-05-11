@@ -153,6 +153,11 @@ interface SessionState {
   // suffix advances during long turns. Cleared at finalize and on
   // bridge cleanup.
   spinnerTicker: NodeJS.Timeout | undefined;
+  // Slash command names (with leading "/") advertised by the daemon for
+  // this session: the union of /hydra verbs and the backing agent's
+  // commands. Refreshed on every available_commands_update. Used to
+  // route `!<verb>` bangs and produce a useful error for typos.
+  availableCommands: Map<string, string | undefined>;
 }
 
 export interface SessionBridgeOptions {
@@ -613,7 +618,39 @@ export class SessionBridge {
         }
         break;
       }
-      case "available_commands_update":
+      case "available_commands_update": {
+        // Refresh the per-session command set so `!<verb>` routing knows
+        // what's valid. Both /hydra verbs (merged in by the daemon) and
+        // the backing agent's commands arrive on this channel; we store
+        // them keyed by name → description (description optional).
+        const raw = update.availableCommands ?? update.commands;
+        const list = Array.isArray(raw) ? raw : [];
+        const session = this.sessions.get(sessionId);
+        if (session) {
+          session.availableCommands.clear();
+          for (const c of list) {
+            if (!c || typeof c !== "object") {
+              continue;
+            }
+            const entry = c as { name?: unknown; description?: unknown };
+            if (typeof entry.name !== "string" || entry.name.length === 0) {
+              continue;
+            }
+            // Normalize: protocol may advertise either bare ("create_plan")
+            // or slash-prefixed ("/hydra title") names. Store slash-prefixed
+            // so the bang→slash mapping is a direct lookup.
+            const name = entry.name.startsWith("/")
+              ? entry.name
+              : `/${entry.name}`;
+            const desc =
+              typeof entry.description === "string"
+                ? entry.description
+                : undefined;
+            session.availableCommands.set(name, desc);
+          }
+        }
+        break;
+      }
       case "config_option_update":
         // Ignored — no slack-relevant signal.
         break;
@@ -1148,6 +1185,7 @@ export class SessionBridge {
       spinnerTicker: undefined,
       planTs: undefined,
       hadActivity: false,
+      availableCommands: new Map(),
     };
     this.sessions.set(sessionId, session);
     threadRegistry.register({
@@ -1933,6 +1971,16 @@ export class SessionBridge {
     ts: string,
   ): Promise<string | undefined> {
     return this.opts.thread.fetchText(channel, ts);
+  }
+
+  // Returns the live slash-command map for the session, name → description
+  // (description optional). The set is reset on every
+  // available_commands_update from the daemon; an empty map means the
+  // bridge hasn't yet seen one (slack should treat unknown bangs as a
+  // soft error in that case).
+  availableCommands(sessionId: string): ReadonlyMap<string, string | undefined> {
+    const s = this.sessions.get(sessionId);
+    return s?.availableCommands ?? new Map();
   }
 
   debugInfo(sessionId: string): string {

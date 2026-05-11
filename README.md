@@ -177,7 +177,7 @@ through. Slack-side prompts are forwarded back via `session/prompt`.
 | `!debug`                         | inside a thread  | Replies with the session's debug info (sessionId, channel, ws state, last-frame time). |
 | `!agents`                        | anywhere         | Lists agents installed in hydra's registry (`GET /v1/agents`). |
 | `!session [agent] [cwd] [prompt…]` | anywhere         | Asks hydra to create a fresh ACP session (`POST /v1/sessions`). Both positionals are optional — hydra falls back to `defaultAgent` and `defaultCwd` from `~/.hydra-acp/config.json` (which itself defaults to `claude-code` and `~`). |
-| `!title [text]`                  | inside a thread  | Shortcut for hydra's `/hydra title` slash command. With an argument, sets the session title directly; without one, asks the agent to retitle. |
+| `!<rest>`                        | inside a thread  | Strict-mirror of slash commands: anything else starting with `!` is forwarded as `/<rest>` — e.g. `!hydra title foo` → `/hydra title foo`, `!hydra switch claude-code` → `/hydra switch claude-code`, `!create_plan write a function` → `/create_plan write a function`. The bot validates the verb against the daemon-advertised command set (`available_commands_update`, which the daemon merges its `/hydra` registry with the agent's own commands), so any new daemon or agent verb automatically becomes a `!`-command here. Unknown verbs get a `:grey_question:` reaction and a thread reply listing what's available. |
 
 `!session` parsing rules:
 
