@@ -1,6 +1,11 @@
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { WebSocket } from "ws";
 import { logger } from "../util/log.js";
+
+const pkg = JSON.parse(
+  readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+) as { version: string };
 import {
   type JsonRpcId,
   type JsonRpcMessage,
@@ -237,7 +242,7 @@ export class AcpAttach extends EventEmitter<AttachEvents> {
       }>("session/attach", {
         sessionId: this.opts.sessionId,
         historyPolicy: "full",
-        clientInfo: { name: "hydra-acp-slack", version: "0.1.0" },
+        clientInfo: { name: "hydra-acp-slack", version: pkg.version },
       });
       this._attachMeta = attachResult._meta;
       const hydraMeta = (attachResult._meta?.["hydra-acp"] ?? {}) as {
