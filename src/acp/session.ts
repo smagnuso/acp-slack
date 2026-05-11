@@ -204,6 +204,16 @@ export class SessionBridge {
   // never open two threads or post into the channel before the parent ts
   // is known.
   private creating = new Map<string, Promise<SessionState | undefined>>();
+  // available_commands_update payloads that arrive before a SessionState
+  // exists (typically during the attach replay window, when the bridge
+  // hasn't yet flipped to `live` and createSession hasn't run). Latest
+  // wins, keyed by sessionId. Drained into SessionState.availableCommands
+  // at createSession time so the routing map is non-empty by the time
+  // the first live `!<verb>` arrives.
+  private pendingCommands = new Map<
+    string,
+    Map<string, string | undefined>
+  >();
   // String(requestId) -> resolver for any in-flight permission request
   // awaiting a Slack reaction. Keyed by requestId rather than sessionId
   // because an agent can have multiple permission requests pending on
@@ -351,6 +361,24 @@ export class SessionBridge {
         );
       }
       return;
+    }
+
+    // available_commands_update is the one session/update kind we want
+    // to process during the replay window — it's a state snapshot that
+    // populates the routing map for `!<verb>` bangs, not an event that
+    // would re-render old transcript content. Handled out-of-band here
+    // before the live gate so a session whose commands update only ever
+    // arrives in replay (the common case for short-lived sessions)
+    // still gets a populated availableCommands map.
+    const earlySessionId = (params.sessionId ?? params.session_id) as
+      | string
+      | undefined;
+    if (
+      n.method === "session/update" &&
+      earlySessionId &&
+      isAvailableCommandsUpdate(params)
+    ) {
+      this.applyAvailableCommandsUpdate(earlySessionId, params);
     }
 
     if (!this.live) {
@@ -618,39 +646,13 @@ export class SessionBridge {
         }
         break;
       }
-      case "available_commands_update": {
+      case "available_commands_update":
         // Refresh the per-session command set so `!<verb>` routing knows
-        // what's valid. Both /hydra verbs (merged in by the daemon) and
-        // the backing agent's commands arrive on this channel; we store
-        // them keyed by name → description (description optional).
-        const raw = update.availableCommands ?? update.commands;
-        const list = Array.isArray(raw) ? raw : [];
-        const session = this.sessions.get(sessionId);
-        if (session) {
-          session.availableCommands.clear();
-          for (const c of list) {
-            if (!c || typeof c !== "object") {
-              continue;
-            }
-            const entry = c as { name?: unknown; description?: unknown };
-            if (typeof entry.name !== "string" || entry.name.length === 0) {
-              continue;
-            }
-            // Normalize: protocol may advertise either bare ("create_plan")
-            // or slash-prefixed ("/hydra title") names. Store slash-prefixed
-            // so the bang→slash mapping is a direct lookup.
-            const name = entry.name.startsWith("/")
-              ? entry.name
-              : `/${entry.name}`;
-            const desc =
-              typeof entry.description === "string"
-                ? entry.description
-                : undefined;
-            session.availableCommands.set(name, desc);
-          }
-        }
+        // what's valid. Live and replay paths both end up here, but the
+        // replay path runs out-of-band above the `!this.live` gate, so
+        // this case only fires for live events.
+        this.applyAvailableCommandsUpdate(sessionId, params);
         break;
-      }
       case "config_option_update":
         // Ignored — no slack-relevant signal.
         break;
@@ -1185,8 +1187,9 @@ export class SessionBridge {
       spinnerTicker: undefined,
       planTs: undefined,
       hadActivity: false,
-      availableCommands: new Map(),
+      availableCommands: this.pendingCommands.get(sessionId) ?? new Map(),
     };
+    this.pendingCommands.delete(sessionId);
     this.sessions.set(sessionId, session);
     threadRegistry.register({
       bridge: this,
@@ -1980,7 +1983,53 @@ export class SessionBridge {
   // soft error in that case).
   availableCommands(sessionId: string): ReadonlyMap<string, string | undefined> {
     const s = this.sessions.get(sessionId);
-    return s?.availableCommands ?? new Map();
+    if (s) {
+      return s.availableCommands;
+    }
+    return this.pendingCommands.get(sessionId) ?? new Map();
+  }
+
+  // Decode an available_commands_update params payload and apply it to
+  // whichever map currently represents the session: the live
+  // SessionState if one exists, otherwise the pendingCommands stash so
+  // createSession can adopt it once the bridge opens a thread.
+  private applyAvailableCommandsUpdate(
+    sessionId: string,
+    params: Record<string, unknown>,
+  ): void {
+    const update = (params.update ?? {}) as Record<string, unknown>;
+    const raw = update.availableCommands ?? update.commands;
+    const list = Array.isArray(raw) ? raw : [];
+    const next = new Map<string, string | undefined>();
+    for (const c of list) {
+      if (!c || typeof c !== "object") {
+        continue;
+      }
+      const entry = c as { name?: unknown; description?: unknown };
+      if (typeof entry.name !== "string" || entry.name.length === 0) {
+        continue;
+      }
+      // Normalize: protocol may advertise either bare ("create_plan")
+      // or slash-prefixed ("/hydra title") names. Store slash-prefixed
+      // so the bang→slash mapping is a direct lookup.
+      const name = entry.name.startsWith("/")
+        ? entry.name
+        : `/${entry.name}`;
+      const desc =
+        typeof entry.description === "string"
+          ? entry.description
+          : undefined;
+      next.set(name, desc);
+    }
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.availableCommands.clear();
+      for (const [k, v] of next) {
+        session.availableCommands.set(k, v);
+      }
+    } else {
+      this.pendingCommands.set(sessionId, next);
+    }
   }
 
   debugInfo(sessionId: string): string {
@@ -1999,6 +2048,14 @@ export class SessionBridge {
       2,
     );
   }
+}
+
+// Quick predicate so the early-out path that peels off
+// available_commands_update from the live gate doesn't need to repeat
+// the type narrowing inline.
+function isAvailableCommandsUpdate(params: Record<string, unknown>): boolean {
+  const update = (params.update ?? {}) as { sessionUpdate?: unknown };
+  return update.sessionUpdate === "available_commands_update";
 }
 
 // Render the thread's parent-message text. Always includes
