@@ -1,6 +1,5 @@
-import { mkdirSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 import type { Config } from "../config.js";
 import { toSlackMrkdwn } from "../formatters/markdown.js";
 import {
@@ -1810,11 +1809,6 @@ export class SessionBridge {
           await this.handleHeart(channel, ts);
         }
         return;
-      case "bookmark":
-        if (added) {
-          await this.handleBookmark(session, channel, ts);
-        }
-        return;
     }
   }
 
@@ -1939,34 +1933,6 @@ export class SessionBridge {
       first.sessionId,
       `The user heart-reacted to: ${text}`,
     );
-  }
-
-  private async handleBookmark(
-    session: SessionState,
-    channel: string,
-    ts: string,
-  ): Promise<void> {
-    const text = await this.fetchMessageText(channel, ts);
-    if (text === undefined) {
-      return;
-    }
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const file = join(this.opts.config.todoDirectory, `bookmark-${stamp}.org`);
-    try {
-      mkdirSync(this.opts.config.todoDirectory, { recursive: true });
-      writeFileSync(
-        file,
-        `* TODO ${session.title ?? session.sessionId}\n${text}\n`,
-      );
-    } catch (err) {
-      log.warn(`bookmark write failed: ${(err as Error).message}`);
-      return;
-    }
-    await this.opts.thread.postMessage({
-      channel,
-      threadTs: session.threadTs,
-      text: `:bookmark: TODO created: \`${basename(file)}\``,
-    });
   }
 
   private async fetchMessageText(

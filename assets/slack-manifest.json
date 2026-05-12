@@ -1,0 +1,47 @@
+{
+  "display_information": {
+    "name": "HydraSlackAgent",
+    "description": "Bridge hydra-acp sessions to Slack threads.",
+    "background_color": "#7C3AED"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "HydraSlackAgent",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "commands",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "files:write",
+        "groups:history",
+        "groups:read",
+        "groups:write",
+        "im:history",
+        "reactions:read"
+      ]
+    },
+    "pkce_enabled": false
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "reaction_added",
+        "reaction_removed"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}

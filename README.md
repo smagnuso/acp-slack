@@ -37,31 +37,90 @@ forwarded back via `session/prompt`.
 
 ## Setup
 
-1. **Slack app.** Create a Slack app with these scopes:
-   - Bot scopes: `chat:write`, `chat:write.customize`,
-     `reactions:read`, `reactions:write`, `files:read`, `channels:history`,
-     `groups:history`, `im:history`, `mpim:history`, `users:read`.
-   - Enable **Socket Mode** and generate an `xapp-...` app-level token
-     with `connections:write`.
-   - Subscribe to events: `message.channels`, `message.groups`,
-     `message.im`, `reaction_added`, `reaction_removed`.
-   - Install the app to your workspace and grab the bot token (`xoxb-...`).
-2. **Config file.** Place credentials at `~/.hydra-acp-slack.conf`:
+### 1. Create the Slack app
 
-   ```
-   SLACK_BOT_TOKEN=xoxb-...
-   SLACK_APP_TOKEN=xapp-...
-   SLACK_CHANNEL_ID=C0123456789
+The fastest path is to use the **app manifest** included in this repo
+([`assets/slack-manifest.json`](assets/slack-manifest.json)) — it
+pre-fills every scope and event subscription the bridge needs, so you
+don't have to click through OAuth and Event Subscriptions tabs one box
+at a time.
 
-   AUTHORIZED_USERS=U12345678,U23456789
-   PER_PROJECT_CHANNELS=true
-   SHOW_TOOL_OUTPUT=false
-   HIDDEN_MESSAGES_DIR=~/.hydra-acp-slack/hidden
-   TRUNCATED_MESSAGES_DIR=~/.hydra-acp-slack/truncated
-   TODO_DIRECTORY=~/org/todo
-   WEBSOCKET_STALE_THRESHOLD=7200
-   DEBUG=false
-   ```
+1. Go to https://api.slack.com/apps → **Create New App** → **From a
+   manifest**.
+2. Pick the workspace you want the bot to live in. Click **Next**.
+3. **Paste the contents of `assets/slack-manifest.json`** from this
+   repo. Slack defaults to YAML; switch the toggle to **JSON** so the
+   paste parses cleanly. Click **Next**, then **Create**.
+4. After creation, Slack drops you in **Basic Information**. Two
+   credentials live elsewhere — go fetch them:
+   - **Bot User OAuth Token** — left sidebar → **OAuth & Permissions** →
+     scroll to "OAuth Tokens for Your Workspace". You'll see "Install to
+     Workspace" first; click it, approve, and the page comes back with
+     the bot token (starts with `xoxb-...`). Copy it.
+   - **App-Level Token** — left sidebar → **Basic Information** → scroll
+     to "App-Level Tokens" → **Generate Token and Scopes** → name it
+     anything → check `connections:write` → **Generate**. Copy the
+     `xapp-...` token shown once.
+5. **Invite the bot to a channel.** In Slack itself, in whichever
+   channel you want hydra to post to, type `/invite @HydraSlackAgent`
+   (or whatever you renamed the bot to). You can't post to a channel
+   the bot isn't a member of.
+6. **Grab the channel ID.** In Slack, click the channel name at the top
+   → **About** tab → scroll to the bottom — the channel ID (starts with
+   `C` for public, `G` for private) is shown there. You'll paste this
+   into the config below.
+
+If you'd rather build the app from scratch instead of using the
+manifest, the manual flow is:
+
+- Bot scopes: `commands`, `channels:history`, `channels:read`,
+  `chat:write`, `files:write`, `groups:history`, `groups:read`,
+  `groups:write`, `im:history`, `reactions:read`.
+- Enable **Socket Mode** in the Settings tab.
+- Subscribe to bot events: `message.channels`, `message.groups`,
+  `message.im`, `reaction_added`, `reaction_removed`.
+- Enable **Interactivity** under Interactivity & Shortcuts.
+- Generate an app-level token with `connections:write` and install the
+  app to your workspace to mint the bot token.
+
+### 2. Write the config file
+
+Place credentials at `~/.hydra-acp-slack.conf`. This is a plain
+`KEY=VALUE` file — quotes optional, comments with `#`. The bridge
+reads it on startup; tokens never live in env vars or shell history.
+
+```
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+SLACK_CHANNEL_ID=C0123456789
+
+AUTHORIZED_USERS=U12345678,U23456789
+PER_PROJECT_CHANNELS=true
+HIDDEN_MESSAGES_DIR=~/.hydra-acp-slack/hidden
+TRUNCATED_MESSAGES_DIR=~/.hydra-acp-slack/truncated
+WEBSOCKET_STALE_THRESHOLD=7200
+DEBUG=false
+```
+
+Lock it down — these tokens give full read/write access to whichever
+channels the bot is in, so treat them like API keys:
+
+```sh
+chmod 600 ~/.hydra-acp-slack.conf
+```
+
+`AUTHORIZED_USERS` is the allowlist of Slack user IDs whose messages
+the bridge will forward to the agent as prompts (and whose reactions
+are honored for allow/deny/cancel). To find your own user ID, click
+your profile in Slack → **More** → **Copy member ID**.
+
+> ⚠️ **Leaving `AUTHORIZED_USERS` empty means there is no allowlist —
+> anyone the bot can see (i.e. anyone in the channels the bot is
+> invited to) can prompt the agent and approve tool calls.** That's a
+> reasonable default for a personal bot in a single-member workspace,
+> but if other people share the workspace, set this to your own user
+> ID (and any teammates you trust) before adding the bot to shared
+> channels.
 
 3. **Install or build.**
 
@@ -133,18 +192,16 @@ forwarded back via `session/prompt`.
 
 | Key                         | Default                            | Notes |
 |-----------------------------|------------------------------------|-------|
-| `SLACK_BOT_TOKEN`           | (required)                         | `xoxb-...` |
-| `SLACK_APP_TOKEN`           | (required)                         | `xapp-...` |
-| `SLACK_CHANNEL_ID`          | none                               | Default channel when per-project disabled or no mapping. |
-| `AUTHORIZED_USERS`          | empty                              | Comma-separated Slack user IDs. Empty = inbound disabled. |
+| `SLACK_BOT_TOKEN`           | (required)                         | Bot User OAuth Token from Slack, `xoxb-...`. |
+| `SLACK_APP_TOKEN`           | (required)                         | App-Level Token from Slack, `xapp-...`, with `connections:write`. |
+| `SLACK_CHANNEL_ID`          | none                               | Default channel ID (`C...`/`G...`). Used when `PER_PROJECT_CHANNELS=false` or no per-cwd mapping matches. |
+| `AUTHORIZED_USERS`          | empty                              | Comma-separated Slack user IDs (`U…`) allowed to prompt the agent. **Empty = anyone in the bot's channels can prompt** — see security note below. Bot reactions (allow/deny/cancel) are gated the same way. |
 | `PER_PROJECT_CHANNELS`      | `true`                             | Look up channel per session cwd in the channel map. |
 | `CHANNEL_PREFIX`            | empty                              | Reserved for auto-create flows; unused for now. |
 | `CHANNELS_FILE`             | `~/.hydra-acp-slack/channels.json` | JSON map of cwd → channel ID. |
-| `SHOW_TOOL_OUTPUT`          | `false`                            | If true, include tool body inline (still truncated). |
 | `UPLOAD_TRANSCRIPT_ON_END`  | `true`                             | When the hydra session closes, upload the thread's contents as a markdown file attached to the same thread. Set to `false` to disable. |
 | `HIDDEN_MESSAGES_DIR`       | `~/.hydra-acp-slack/hidden`        | Where 🙈-hidden message originals go. |
 | `TRUNCATED_MESSAGES_DIR`    | `~/.hydra-acp-slack/truncated`     | Where full tool outputs cache for 📖 expand. |
-| `TODO_DIRECTORY`            | `~/org/todo`                       | Where bookmark reactions write TODO files. |
 | `WEBSOCKET_STALE_THRESHOLD` | `30`                               | Seconds of continuously-disconnected Slack Socket Mode WS before the bridge `process.exit(1)`s. Hydra's extension manager respawns it ~1s later with a fresh DNS cache + HTTP client; the existing process gets stuck in a reconnect loop after a network flap (VPN drop, etc.). |
 | `BACKFILL_HISTORY`          | `false`                            | If true, replay hydra's cached history into Slack on attach. Off by default — replays trip Slack rate limits and create noise. |
 | `LIVE_QUIET_MS`             | `2000`                             | Inbound silence (ms) needed before considering an attach "live" when `BACKFILL_HISTORY=false`. |
@@ -168,7 +225,6 @@ forwarded back via `session/prompt`.
 | `:eyes:`                                                                         | Expand truncated tool output |
 | `:book:` / `:open_book:`                                                         | Expand full tool output |
 | `:heart:` (and friends)                                                          | Forward as positive feedback to agent |
-| `:bookmark:`                                                                     | Save message text as an org TODO |
 
 ## Slash-style commands
 

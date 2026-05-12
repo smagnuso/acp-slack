@@ -10,11 +10,9 @@ export interface Config {
   perProjectChannels: boolean;
   channelPrefix: string;
   channelsFile: string;
-  showToolOutput: boolean;
   uploadTranscriptOnEnd: boolean;
   hiddenMessagesDir: string;
   truncatedMessagesDir: string;
-  todoDirectory: string;
   websocketStaleThreshold: number;
   imageUploadRateLimit: number;
   imageUploadRateWindow: number;
@@ -160,7 +158,6 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
     channelsFile: expandHome(
       map.get("CHANNELS_FILE") ?? "~/.hydra-acp-slack/channels.json",
     ),
-    showToolOutput: bool(map, "SHOW_TOOL_OUTPUT", false),
     uploadTranscriptOnEnd: bool(map, "UPLOAD_TRANSCRIPT_ON_END", true),
     hiddenMessagesDir: expandHome(
       map.get("HIDDEN_MESSAGES_DIR") ?? "~/.hydra-acp-slack/hidden",
@@ -168,7 +165,6 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
     truncatedMessagesDir: expandHome(
       map.get("TRUNCATED_MESSAGES_DIR") ?? "~/.hydra-acp-slack/truncated",
     ),
-    todoDirectory: expandHome(map.get("TODO_DIRECTORY") ?? "~/org/todo"),
     websocketStaleThreshold: intVal(map, "WEBSOCKET_STALE_THRESHOLD", 30),
     imageUploadRateLimit: intVal(map, "IMAGE_UPLOAD_RATE_LIMIT", 30),
     imageUploadRateWindow: intVal(map, "IMAGE_UPLOAD_RATE_WINDOW", 60),

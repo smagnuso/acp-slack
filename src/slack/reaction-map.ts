@@ -8,8 +8,7 @@ export type ReactionAction =
   | "hide"
   | "expand_truncated"
   | "expand_full"
-  | "heart"
-  | "bookmark";
+  | "heart";
 
 const MAP: Record<string, ReactionAction> = {
   white_check_mark: "allow",
@@ -42,8 +41,6 @@ const MAP: Record<string, ReactionAction> = {
   sparkling_heart: "heart",
   two_hearts: "heart",
   revolving_hearts: "heart",
-
-  bookmark: "bookmark",
 };
 
 export function reactionAction(name: string): ReactionAction | undefined {
