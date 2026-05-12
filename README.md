@@ -95,9 +95,6 @@ SLACK_APP_TOKEN=xapp-...
 SLACK_CHANNEL_ID=C0123456789
 
 AUTHORIZED_USERS=U12345678,U23456789
-PER_PROJECT_CHANNELS=true
-HIDDEN_MESSAGES_DIR=~/.hydra-acp-slack/hidden
-TRUNCATED_MESSAGES_DIR=~/.hydra-acp-slack/truncated
 WEBSOCKET_STALE_THRESHOLD=7200
 DEBUG=false
 ```
@@ -122,71 +119,109 @@ your profile in Slack → **More** → **Copy member ID**.
 > ID (and any teammates you trust) before adding the bot to shared
 > channels.
 
-3. **Install or build.**
+### 3. State directory
 
-   From npm (recommended once published):
+The bridge owns one directory on disk: `~/.hydra-acp-slack/`. It's
+created lazily as the bridge runs; you don't need to set it up by
+hand. Layout:
 
-   ```sh
-   npm install -g @hydra-acp/slack
-   ```
+```
+~/.hydra-acp-slack/
+├── channels.json   # optional: { "<absolute cwd>": "<channelId>", ... }
+├── hidden/         # full text of 🙈-hidden messages (so they can be restored)
+└── truncated/      # full tool output cached for 📖 expand
+```
 
-   This drops an `hydra-acp-slack` binary on your PATH.
+**`channels.json`** is the only file you might want to seed by hand.
+It routes hydra sessions to Slack channels by their cwd — useful if
+you run hydra in multiple project directories and want each in its
+own channel. Example:
 
-   Or from source:
+```json
+{
+  "/home/me/work/big-project": "C01ABC",
+  "/home/me/personal/side-quest": "C02DEF"
+}
+```
 
-   ```sh
-   git clone https://github.com/smagnuso/hydra-acp-slack.git ~/dev/hydra-acp-slack
-   cd ~/dev/hydra-acp-slack
-   npm install
-   npm run build
-   ```
+When a session attaches with cwd `/home/me/work/big-project`, the
+bridge posts to channel `C01ABC`. If the cwd isn't in the map (or the
+session has no cwd), the bridge falls back to `SLACK_CHANNEL_ID`.
 
-4. **Run as a hydra extension (recommended).** Register the extension
-   with hydra. If installed via npm:
+The bridge watches `channels.json` and reloads it on change — edits
+take effect the next time a session resolves a channel, no restart
+required. Editor save styles that do atomic rename-over-original
+(vim, emacs auto-save, `jq -i`, etc.) are handled. Bad JSON or a
+deleted file just leaves the previous map in place and logs a
+warning so a typo doesn't blow away routing for active sessions.
 
-   ```sh
-   hydra-acp extensions add hydra-acp-slack --command hydra-acp-slack
-   ```
+### 4. Install or build
 
-   Or pointed at a local build:
+From npm (recommended):
 
-   ```sh
-   hydra-acp extensions add hydra-acp-slack \
-     --command node \
-     --args ~/dev/hydra-acp-slack/dist/index.js
-   ```
+```sh
+npm install -g @hydra-acp/slack
+```
 
-   That writes the equivalent entry into `~/.hydra-acp/config.json`:
+This drops an `hydra-acp-slack` binary on your PATH.
 
-   ```json
-   {
-     "extensions": {
-       "hydra-acp-slack": {
-         "command": ["node"],
-         "args": ["/home/you/dev/hydra-acp-slack/dist/index.js"],
-         "enabled": true
-       }
-     }
-   }
-   ```
+Or from source:
 
-   On `hydra-acp daemon start`, hydra spawns hydra-acp-slack with these env
-   vars set: `HYDRA_ACP_DAEMON_URL`, `HYDRA_ACP_TOKEN`, `HYDRA_ACP_WS_URL`.
-   hydra-acp-slack uses them to discover and attach to sessions. Stdout/stderr
-   land in `~/.hydra-acp/extensions/hydra-acp-slack.log`. Lifecycle is managed
-   with `hydra-acp extensions start|stop|restart hydra-acp-slack` and
-   `hydra-acp extensions logs hydra-acp-slack -f` to tail.
+```sh
+git clone https://github.com/smagnuso/hydra-acp-slack.git ~/dev/hydra-acp-slack
+cd ~/dev/hydra-acp-slack
+npm install
+npm run build
+```
 
-5. **Run standalone (alternative).** Set `HYDRA_DAEMON_URL` and
-   `HYDRA_TOKEN` in `~/.hydra-acp-slack.conf` (or export them as env
-   vars), then:
+### 5. Run as a hydra extension (recommended)
 
-   ```sh
-   npm start
-   ```
+Register the extension with hydra. If installed via npm:
 
-   The daemon prints which hydra it's polling and which authorized users
-   it accepts.
+```sh
+hydra-acp extensions add hydra-acp-slack --command hydra-acp-slack
+```
+
+Or pointed at a local build:
+
+```sh
+hydra-acp extensions add hydra-acp-slack \
+  --command node \
+  --args ~/dev/hydra-acp-slack/dist/index.js
+```
+
+That writes the equivalent entry into `~/.hydra-acp/config.json`:
+
+```json
+{
+  "extensions": {
+    "hydra-acp-slack": {
+      "command": ["node"],
+      "args": ["/home/you/dev/hydra-acp-slack/dist/index.js"],
+      "enabled": true
+    }
+  }
+}
+```
+
+On `hydra-acp daemon start`, hydra spawns hydra-acp-slack with these env
+vars set: `HYDRA_ACP_DAEMON_URL`, `HYDRA_ACP_TOKEN`, `HYDRA_ACP_WS_URL`.
+hydra-acp-slack uses them to discover and attach to sessions. Stdout/stderr
+land in `~/.hydra-acp/extensions/hydra-acp-slack.log`. Lifecycle is managed
+with `hydra-acp extensions start|stop|restart hydra-acp-slack` and
+`hydra-acp extensions logs hydra-acp-slack -f` to tail.
+
+### 6. Run standalone (alternative)
+
+Set `HYDRA_DAEMON_URL` and `HYDRA_TOKEN` in `~/.hydra-acp-slack.conf`
+(or export them as env vars), then:
+
+```sh
+npm start
+```
+
+The daemon prints which hydra it's polling and which authorized users
+it accepts.
 
 ## Configuration keys
 
@@ -194,14 +229,9 @@ your profile in Slack → **More** → **Copy member ID**.
 |-----------------------------|------------------------------------|-------|
 | `SLACK_BOT_TOKEN`           | (required)                         | Bot User OAuth Token from Slack, `xoxb-...`. |
 | `SLACK_APP_TOKEN`           | (required)                         | App-Level Token from Slack, `xapp-...`, with `connections:write`. |
-| `SLACK_CHANNEL_ID`          | none                               | Default channel ID (`C...`/`G...`). Used when `PER_PROJECT_CHANNELS=false` or no per-cwd mapping matches. |
+| `SLACK_CHANNEL_ID`          | none                               | Default channel ID (`C…`/`G…`). Used when the session's cwd has no entry in `~/.hydra-acp-slack/channels.json` (or the session has no cwd). |
 | `AUTHORIZED_USERS`          | empty                              | Comma-separated Slack user IDs (`U…`) allowed to prompt the agent. **Empty = anyone in the bot's channels can prompt** — see security note below. Bot reactions (allow/deny/cancel) are gated the same way. |
-| `PER_PROJECT_CHANNELS`      | `true`                             | Look up channel per session cwd in the channel map. |
-| `CHANNEL_PREFIX`            | empty                              | Reserved for auto-create flows; unused for now. |
-| `CHANNELS_FILE`             | `~/.hydra-acp-slack/channels.json` | JSON map of cwd → channel ID. |
 | `UPLOAD_TRANSCRIPT_ON_END`  | `true`                             | When the hydra session closes, upload the thread's contents as a markdown file attached to the same thread. Set to `false` to disable. |
-| `HIDDEN_MESSAGES_DIR`       | `~/.hydra-acp-slack/hidden`        | Where 🙈-hidden message originals go. |
-| `TRUNCATED_MESSAGES_DIR`    | `~/.hydra-acp-slack/truncated`     | Where full tool outputs cache for 📖 expand. |
 | `WEBSOCKET_STALE_THRESHOLD` | `30`                               | Seconds of continuously-disconnected Slack Socket Mode WS before the bridge `process.exit(1)`s. Hydra's extension manager respawns it ~1s later with a fresh DNS cache + HTTP client; the existing process gets stuck in a reconnect loop after a network flap (VPN drop, etc.). |
 | `BACKFILL_HISTORY`          | `false`                            | If true, replay hydra's cached history into Slack on attach. Off by default — replays trip Slack rate limits and create noise. |
 | `LIVE_QUIET_MS`             | `2000`                             | Inbound silence (ms) needed before considering an attach "live" when `BACKFILL_HISTORY=false`. |
@@ -254,7 +284,7 @@ Examples:
 !session -- what time is it?              # all defaults + first prompt
 ```
 
-The bot reacts ✅ on the command message and replies with the resolved agent/cwd. The new thread appears in whichever channel the resolved cwd maps to (per `PER_PROJECT_CHANNELS` + `CHANNELS_FILE`), which may differ from where `!session` was posted.
+The bot reacts ✅ on the command message and replies with the resolved agent/cwd. The new thread appears in whichever channel the resolved cwd maps to in `~/.hydra-acp-slack/channels.json` — falling back to `SLACK_CHANNEL_ID` when no mapping is found — which may differ from where `!session` was posted.
 
 ## Tests
 

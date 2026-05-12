@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 import { AcpAttach } from "./acp/attach.js";
 import { SessionBridge } from "./acp/session.js";
-import { configPath, loadConfig } from "./config.js";
+import {
+  channelsFile,
+  configPath,
+  hiddenMessagesDir,
+  loadConfig,
+  truncatedMessagesDir,
+} from "./config.js";
 import { HydraDiscovery } from "./hydra-discovery.js";
 import { createSlackApp } from "./slack/app.js";
 import { consumePendingMessages } from "./slack/resurrect.js";
@@ -33,9 +39,10 @@ async function main(): Promise<void> {
   const slack = createSlackApp(config);
   await slack.start();
   const thread = new ThreadClient(slack.app);
-  const channels = new ChannelMap(config.channelsFile);
-  const truncatedStore = new TruncatedStore(config.truncatedMessagesDir);
-  const hiddenStore = new HiddenStore(config.hiddenMessagesDir);
+  const channels = new ChannelMap(channelsFile());
+  channels.startWatching();
+  const truncatedStore = new TruncatedStore(truncatedMessagesDir());
+  const hiddenStore = new HiddenStore(hiddenMessagesDir());
 
   const bridges = new Map<string, AttachContext>();
 

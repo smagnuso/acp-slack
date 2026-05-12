@@ -1112,7 +1112,7 @@ export class SessionBridge {
     if (!channel) {
       log.warn(
         `no Slack channel resolved for sessionId=${sessionId} cwd=${cwd ?? "?"}; ` +
-          `set SLACK_CHANNEL_ID or PER_PROJECT_CHANNELS=true with a known mapping`,
+          `set SLACK_CHANNEL_ID or add a cwd → channelId entry to ~/.hydra-acp-slack/channels.json`,
       );
       return undefined;
     }
@@ -1213,14 +1213,17 @@ export class SessionBridge {
   }
 
   private resolveChannel(cwd: string | undefined): string | undefined {
-    const cfg = this.opts.config;
-    if (cfg.perProjectChannels && cwd) {
+    // Prefer a per-cwd mapping from ~/.hydra-acp-slack/channels.json so
+    // different projects can post to different Slack channels. Falls
+    // back to the global SLACK_CHANNEL_ID when no mapping matches (or
+    // the session has no cwd to look up).
+    if (cwd) {
       const mapped = this.opts.channels.get(cwd);
       if (mapped) {
         return mapped;
       }
     }
-    return cfg.slackChannelId ?? undefined;
+    return this.opts.config.slackChannelId ?? undefined;
   }
 
   private async applyTitle(sessionId: string, title: string): Promise<void> {

@@ -7,12 +7,7 @@ export interface Config {
   slackAppToken: string;
   slackChannelId: string | undefined;
   authorizedUsers: Set<string>;
-  perProjectChannels: boolean;
-  channelPrefix: string;
-  channelsFile: string;
   uploadTranscriptOnEnd: boolean;
-  hiddenMessagesDir: string;
-  truncatedMessagesDir: string;
   websocketStaleThreshold: number;
   imageUploadRateLimit: number;
   imageUploadRateWindow: number;
@@ -38,14 +33,26 @@ export interface Config {
 
 const DEFAULT_CONF_PATH = resolve(homedir(), ".hydra-acp-slack.conf");
 
-const TRUTHY = new Set(["1", "true", "yes", "on", "t"]);
+// The bridge owns a single state directory at ~/.hydra-acp-slack/ for
+// every persistent artifact it writes: the cwd → channel routing map,
+// hidden-message originals, and truncated-output cache. We keep the
+// paths fixed (rather than configurable) so users don't have to think
+// about file locations and so the structure stays predictable.
+const STATE_DIR = resolve(homedir(), ".hydra-acp-slack");
 
-function expandHome(p: string): string {
-  if (p.startsWith("~/")) {
-    return resolve(homedir(), p.slice(2));
-  }
-  return p;
+export function channelsFile(): string {
+  return resolve(STATE_DIR, "channels.json");
 }
+
+export function hiddenMessagesDir(): string {
+  return resolve(STATE_DIR, "hidden");
+}
+
+export function truncatedMessagesDir(): string {
+  return resolve(STATE_DIR, "truncated");
+}
+
+const TRUTHY = new Set(["1", "true", "yes", "on", "t"]);
 
 function parseEnvFile(text: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -153,18 +160,7 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
     slackAppToken,
     slackChannelId: map.get("SLACK_CHANNEL_ID") ?? undefined,
     authorizedUsers: stringSet(map, "AUTHORIZED_USERS"),
-    perProjectChannels: bool(map, "PER_PROJECT_CHANNELS", true),
-    channelPrefix: map.get("CHANNEL_PREFIX") ?? "",
-    channelsFile: expandHome(
-      map.get("CHANNELS_FILE") ?? "~/.hydra-acp-slack/channels.json",
-    ),
     uploadTranscriptOnEnd: bool(map, "UPLOAD_TRANSCRIPT_ON_END", true),
-    hiddenMessagesDir: expandHome(
-      map.get("HIDDEN_MESSAGES_DIR") ?? "~/.hydra-acp-slack/hidden",
-    ),
-    truncatedMessagesDir: expandHome(
-      map.get("TRUNCATED_MESSAGES_DIR") ?? "~/.hydra-acp-slack/truncated",
-    ),
     websocketStaleThreshold: intVal(map, "WEBSOCKET_STALE_THRESHOLD", 30),
     imageUploadRateLimit: intVal(map, "IMAGE_UPLOAD_RATE_LIMIT", 30),
     imageUploadRateWindow: intVal(map, "IMAGE_UPLOAD_RATE_WINDOW", 60),
