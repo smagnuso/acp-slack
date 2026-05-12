@@ -16,6 +16,10 @@ import { TruncatedStore, fullExpand, truncate } from "../storage/truncated.js";
 import { sessionMarker, type ThreadClient } from "../slack/thread.js";
 import { logger } from "../util/log.js";
 import type { AcpAttach } from "./attach.js";
+import {
+  fetchHydraHistory,
+  renderHydraHistoryAsMarkdown,
+} from "./hydra-history.js";
 import type { JsonRpcNotification, JsonRpcRequest } from "./protocol.js";
 
 const log = logger("session");
@@ -960,9 +964,10 @@ export class SessionBridge {
   // Build a markdown transcript of every thread we own and upload each
   // to its respective thread as a file attachment. Called from the
   // entry point's bridge-close path before cleanup, gated on
-  // config.uploadTranscriptOnEnd. Source of truth is the Slack thread
-  // itself (conversations.replies) — captures exactly what the user
-  // saw in the channel.
+  // config.uploadTranscriptOnEnd. Source of truth is hydra's REST
+  // history endpoint — the daemon owns the canonical broadcast log
+  // and gives us structured events (prompts, agent text, tool calls,
+  // plans) rather than the Slack-rendered text we used to scrape.
   async uploadTranscriptsOnExit(): Promise<void> {
     if (!this.opts.config.uploadTranscriptOnEnd) {
       return;
@@ -979,18 +984,21 @@ export class SessionBridge {
         continue;
       }
       try {
-        const messages = await this.opts.thread.fetchAllReplies(
-          session.channel,
-          session.threadTs,
-        );
-        if (messages.length === 0) {
+        const entries = await fetchHydraHistory({
+          daemonUrl: this.opts.config.hydraDaemonUrl,
+          token: this.opts.config.hydraToken,
+          sessionId: session.sessionId,
+        });
+        if (entries.length === 0) {
           continue;
         }
-        const md = formatTranscriptMarkdown({
+        const md = renderHydraHistoryAsMarkdown({
           sessionId: session.sessionId,
           title: session.title,
           cwd: session.cwd,
-          messages,
+          currentModel: session.modelId,
+          currentMode: session.modeId,
+          entries,
         });
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         await this.opts.thread.uploadFile({
@@ -1003,7 +1011,7 @@ export class SessionBridge {
           content: md,
         });
         log.info(
-          `transcript uploaded for ${session.sessionId.slice(0, 8)} (${messages.length} messages)`,
+          `transcript uploaded for ${session.sessionId.slice(0, 8)} (${entries.length} entries)`,
         );
       } catch (err) {
         log.warn(
@@ -2150,60 +2158,6 @@ function renderSpinner(session: SessionState): string {
     return head;
   }
   return renderSpinnerExpanded(session, head);
-}
-
-// Format the thread's messages as a markdown transcript. Includes
-// session metadata at the top, then each message in chronological
-// order with author and timestamp. Bot messages display by name; human
-// messages by Slack user id (we don't resolve to display names — keeps
-// the transcript self-contained without extra users.info calls).
-function formatTranscriptMarkdown(opts: {
-  sessionId: string;
-  title: string | undefined;
-  cwd: string | undefined;
-  messages: Array<Record<string, unknown>>;
-}): string {
-  const lines: string[] = [];
-  lines.push(`# ${opts.title ?? "Session transcript"}`);
-  lines.push("");
-  lines.push(`- **Session:** \`${opts.sessionId}\``);
-  if (opts.cwd) {
-    lines.push(`- **Cwd:** \`${opts.cwd}\``);
-  }
-  lines.push(`- **Exported:** ${new Date().toISOString()}`);
-  lines.push("");
-  lines.push("---");
-  lines.push("");
-  for (const m of opts.messages) {
-    const author = (() => {
-      const profile = m.bot_profile as
-        | { name?: string }
-        | undefined;
-      if (profile?.name) {
-        return profile.name;
-      }
-      if (typeof m.user === "string") {
-        return `<@${m.user}>`;
-      }
-      return "unknown";
-    })();
-    const tsStr = (() => {
-      if (typeof m.ts !== "string") {
-        return "";
-      }
-      const sec = Number.parseFloat(m.ts);
-      if (!Number.isFinite(sec)) {
-        return m.ts;
-      }
-      return new Date(sec * 1000).toISOString();
-    })();
-    lines.push(`## ${author} — ${tsStr}`);
-    lines.push("");
-    const text = typeof m.text === "string" ? m.text : "";
-    lines.push(text);
-    lines.push("");
-  }
-  return lines.join("\n");
 }
 
 // Compose the static turn-end marker. Picks an icon and label based on

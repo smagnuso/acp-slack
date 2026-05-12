@@ -128,41 +128,6 @@ export class ThreadClient {
     return undefined;
   }
 
-  // Fetch every reply in a thread, paginating through Slack's
-  // conversations.replies cursor. Used at session-end to build the
-  // transcript-on-exit upload.
-  async fetchAllReplies(
-    channel: string,
-    threadTs: string,
-  ): Promise<Array<Record<string, unknown>>> {
-    const out: Array<Record<string, unknown>> = [];
-    let cursor: string | undefined;
-    while (true) {
-      let res;
-      try {
-        res = await this.app.client.conversations.replies({
-          channel,
-          ts: threadTs,
-          limit: 200,
-          cursor,
-        });
-      } catch (err) {
-        log.warn(
-          `conversations.replies failed: ${(err as Error).message}`,
-        );
-        return out;
-      }
-      const messages = res.messages ?? [];
-      for (const m of messages) {
-        out.push(m as Record<string, unknown>);
-      }
-      cursor = res.response_metadata?.next_cursor;
-      if (!cursor) {
-        return out;
-      }
-    }
-  }
-
   // Upload arbitrary text content as a file in a thread. Used for the
   // session-end transcript dump.
   async uploadFile(opts: {
