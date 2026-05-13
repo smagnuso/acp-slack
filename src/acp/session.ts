@@ -161,6 +161,13 @@ interface SessionState {
   // commands. Refreshed on every available_commands_update. Used to
   // route `!<verb>` bangs and produce a useful error for typos.
   availableCommands: Map<string, string | undefined>;
+  // Identifier of the backing agent process for this session
+  // (e.g. "claude-acp", "codex-acp"). Seeded from sessionMeta.agentId at
+  // attach time and rotated on session_info_update when /hydra switch
+  // emits a new agentId in _meta["hydra-acp"]. Used for the thread
+  // parent header so the agent label tracks the live backing agent
+  // instead of staying frozen at whatever was attached first.
+  agentId: string | undefined;
 }
 
 export interface SessionBridgeOptions {
@@ -420,7 +427,7 @@ export class SessionBridge {
         title: session.title,
         cwd: session.cwd,
         sessionId: session.sessionId,
-        agentName: this.opts.attach.agentInfo?.name,
+        agentName: session.agentId ?? this.opts.attach.agentInfo?.name,
         modelId: session.modelId,
         modeId: session.modeId,
         contextUsed: session.contextUsed,
@@ -642,10 +649,16 @@ export class SessionBridge {
       case "session_info_update": {
         // Hydra synthesizes this on the first prompt of a session and
         // forwards any agent-emitted session_info_update authoritatively.
-        // Either way, we just apply the new title.
+        // Apply the new title (top-level field, per ACP) and/or the new
+        // backing agentId (hydra extension under _meta["hydra-acp"],
+        // emitted on /hydra switch).
         const title = update.title as string | undefined;
         if (typeof title === "string" && title.length > 0) {
           await this.applyTitle(sessionId, title);
+        }
+        const agentId = readHydraAgentId(update._meta);
+        if (agentId !== undefined) {
+          await this.applyAgentId(sessionId, agentId);
         }
         break;
       }
@@ -1147,7 +1160,7 @@ export class SessionBridge {
         title: known.title,
         cwd,
         sessionId,
-        agentName: this.opts.attach.agentInfo?.name ?? known.agentId,
+        agentName: known.agentId ?? this.opts.attach.agentInfo?.name,
         modelId: undefined,
         modeId: undefined,
         contextUsed: undefined,
@@ -1195,6 +1208,7 @@ export class SessionBridge {
       planTs: undefined,
       hadActivity: false,
       availableCommands: this.pendingCommands.get(sessionId) ?? new Map(),
+      agentId: this.opts.sessionMeta.agentId,
     };
     this.pendingCommands.delete(sessionId);
     this.sessions.set(sessionId, session);
@@ -1250,7 +1264,7 @@ export class SessionBridge {
         title,
         cwd: session.cwd,
         sessionId,
-        agentName: this.opts.attach.agentInfo?.name,
+        agentName: session.agentId ?? this.opts.attach.agentInfo?.name,
         modelId: session.modelId,
         modeId: session.modeId,
         contextUsed: session.contextUsed,
@@ -1259,6 +1273,15 @@ export class SessionBridge {
         costCurrency: session.costCurrency,
       }),
     );
+  }
+
+  private async applyAgentId(sessionId: string, agentId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.agentId === agentId) {
+      return;
+    }
+    session.agentId = agentId;
+    await this.refreshParent(session).catch(() => undefined);
   }
 
   // Push the agent's accumulated text to Slack. First flush of a new
@@ -2117,6 +2140,23 @@ function friendlyAgent(name: string | undefined): string | undefined {
   }
   const m = name.match(/^@[^/]+\/(.+)$/);
   return m?.[1] ?? name;
+}
+
+// Pull the hydra agentId from an update's _meta extension namespace.
+// session_info_update's ACP-standard payload is just title/updatedAt;
+// /hydra switch carries the new agentId under _meta["hydra-acp"] so
+// strict ACP clients ignore the extension and hydra-aware clients
+// (this one) read it.
+function readHydraAgentId(meta: unknown): string | undefined {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+    return undefined;
+  }
+  const ns = (meta as Record<string, unknown>)["hydra-acp"];
+  if (!ns || typeof ns !== "object" || Array.isArray(ns)) {
+    return undefined;
+  }
+  const v = (ns as Record<string, unknown>).agentId;
+  return typeof v === "string" ? v : undefined;
 }
 
 function formatTokens(n: number | undefined): string {
