@@ -24,7 +24,7 @@ const log = logger("slack");
 // generic :gear: — new commands work in Slack with no entry here.
 const BANG_VERB_REACTIONS: Record<string, string> = {
   "/hydra title": "label",
-  "/hydra switch": "twisted_rightwards_arrows",
+  "/hydra agent": "twisted_rightwards_arrows",
 };
 
 export interface SlackApp {

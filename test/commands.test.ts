@@ -112,8 +112,8 @@ test("parseBangCommand: !hydra title strict-mirrors to /hydra title", () => {
 });
 
 test("parseBangCommand: preserves args after the verb", () => {
-  assert.deepEqual(parseBangCommand("!hydra switch claude-code"), {
-    slash: "/hydra switch claude-code",
+  assert.deepEqual(parseBangCommand("!hydra agent claude-code"), {
+    slash: "/hydra agent claude-code",
     leadVerb: "hydra",
   });
 });
@@ -143,30 +143,30 @@ test("parseBangCommand: rejects malformed bangs", () => {
 });
 
 test("matchKnownCommand: exact match", () => {
-  const known = ["/hydra title", "/hydra switch"];
+  const known = ["/hydra title", "/hydra agent"];
   assert.equal(matchKnownCommand("/hydra title", known), "/hydra title");
 });
 
 test("matchKnownCommand: prefix match consumes args after a space", () => {
-  const known = ["/hydra title", "/hydra switch"];
+  const known = ["/hydra title", "/hydra agent"];
   assert.equal(
-    matchKnownCommand("/hydra switch claude-code", known),
-    "/hydra switch",
+    matchKnownCommand("/hydra agent claude-code", known),
+    "/hydra agent",
   );
 });
 
 test("matchKnownCommand: longest matching prefix wins", () => {
-  // If both `/hydra` and `/hydra switch` were advertised, the more
-  // specific one should win for "/hydra switch claude".
-  const known = ["/hydra", "/hydra switch"];
+  // If both `/hydra` and `/hydra agent` were advertised, the more
+  // specific one should win for "/hydra agent claude".
+  const known = ["/hydra", "/hydra agent"];
   assert.equal(
-    matchKnownCommand("/hydra switch claude", known),
-    "/hydra switch",
+    matchKnownCommand("/hydra agent claude", known),
+    "/hydra agent",
   );
 });
 
 test("matchKnownCommand: no match returns null", () => {
-  const known = ["/hydra title", "/hydra switch"];
+  const known = ["/hydra title", "/hydra agent"];
   assert.equal(matchKnownCommand("/nope", known), null);
   // Prefix without a separator after it (would match a different verb)
   // doesn't count.

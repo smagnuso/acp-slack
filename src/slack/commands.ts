@@ -180,7 +180,7 @@ export function parseBangCommand(text: string): BangCommand | null {
 
 // Find the longest known command name that matches `slash` either by
 // exact equality or as a prefix followed by whitespace. Returns the
-// matched name (e.g. "/hydra switch") so callers can render
+// matched name (e.g. "/hydra agent") so callers can render
 // per-command UX (reaction emoji, error messages); the forward text is
 // the original `slash`.
 export function matchKnownCommand(

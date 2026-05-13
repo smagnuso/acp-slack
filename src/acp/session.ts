@@ -160,7 +160,7 @@ interface SessionState {
   availableCommands: Map<string, string | undefined>;
   // Identifier of the backing agent process for this session
   // (e.g. "claude-acp", "codex-acp"). Seeded from sessionMeta.agentId at
-  // attach time and rotated on session_info_update when /hydra switch
+  // attach time and rotated on session_info_update when /hydra agent
   // emits a new agentId in _meta["hydra-acp"]. Used for the thread
   // parent header so the agent label tracks the live backing agent
   // instead of staying frozen at whatever was attached first.
@@ -666,7 +666,7 @@ export class SessionBridge {
         // forwards any agent-emitted session_info_update authoritatively.
         // Apply the new title (top-level field, per ACP) and/or the new
         // backing agentId (hydra extension under _meta["hydra-acp"],
-        // emitted on /hydra switch).
+        // emitted on /hydra agent).
         const title = update.title as string | undefined;
         if (typeof title === "string" && title.length > 0) {
           await this.applyTitle(sessionId, title);
@@ -2203,7 +2203,7 @@ function agentWithModel(
 
 // Pull the hydra agentId from an update's _meta extension namespace.
 // session_info_update's ACP-standard payload is just title/updatedAt;
-// /hydra switch carries the new agentId under _meta["hydra-acp"] so
+// /hydra agent carries the new agentId under _meta["hydra-acp"] so
 // strict ACP clients ignore the extension and hydra-aware clients
 // (this one) read it.
 function readHydraAgentId(meta: unknown): string | undefined {
