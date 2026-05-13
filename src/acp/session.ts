@@ -2140,11 +2140,12 @@ function renderParent(opts: {
   }
   const metaParts: string[] = [];
   const agent = friendlyAgent(opts.agentName);
-  if (agent) {
-    metaParts.push(`\`${agent}\``);
-  }
-  if (opts.modelId) {
-    metaParts.push(`\`${opts.modelId}\``);
+  // Collapse "agent · model" into "agent(model)" so the line reads like
+  // "opencode(gpt-5-codex) · mode build · …" rather than three separate
+  // backticked pills competing for the same row.
+  const agentCell = agentWithModel(agent, opts.modelId);
+  if (agentCell) {
+    metaParts.push(`\`${agentCell}\``);
   }
   if (opts.modeId) {
     metaParts.push(`mode \`${opts.modeId}\``);
@@ -2177,6 +2178,27 @@ function friendlyAgent(name: string | undefined): string | undefined {
   }
   const m = name.match(/^@[^/]+\/(.+)$/);
   return m?.[1] ?? name;
+}
+
+// Drop the provider prefix from a model id ("openai/gpt-4o-mini" →
+// "gpt-4o-mini") to keep the thread header line readable.
+function shortenModel(model: string | undefined): string | undefined {
+  if (!model) {
+    return undefined;
+  }
+  const idx = model.lastIndexOf("/");
+  return idx === -1 ? model : model.slice(idx + 1);
+}
+
+function agentWithModel(
+  agent: string | undefined,
+  model: string | undefined,
+): string | undefined {
+  if (!agent) {
+    return undefined;
+  }
+  const short = shortenModel(model);
+  return short ? `${agent}(${short})` : agent;
 }
 
 // Pull the hydra agentId from an update's _meta extension namespace.
