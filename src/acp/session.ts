@@ -16,10 +16,7 @@ import { TruncatedStore, fullExpand, truncate } from "../storage/truncated.js";
 import { sessionMarker, type ThreadClient } from "../slack/thread.js";
 import { logger } from "../util/log.js";
 import type { AcpAttach } from "./attach.js";
-import {
-  fetchHydraHistory,
-  renderHydraHistoryAsMarkdown,
-} from "./hydra-history.js";
+import { fetchHydraBundleText } from "./hydra-bundle.js";
 import type { JsonRpcNotification, JsonRpcRequest } from "./protocol.js";
 
 const log = logger("session");
@@ -148,7 +145,7 @@ interface SessionState {
   // True once this daemon run has seen any session/update notification
   // for this session. Eager-attached sessions (materialized from a
   // marker scan at startup) start false and stay false until a real
-  // notification comes in — used to scope transcript-on-exit uploads
+  // notification comes in — used to scope bundle-on-exit uploads
   // to sessions that actually did something this run, not every old
   // thread we know how to route to.
   hadActivity: boolean;
@@ -243,6 +240,24 @@ export class SessionBridge {
       // the same ts. promptChannel pairs with promptTs for delete.
       promptTs: string | undefined;
       promptChannel: string | undefined;
+      // Pending setTimeout that will release handlePermissionRequest
+      // after config.permissionDisplayDelayMs. Both the timer firing
+      // and a sibling-driven resolvePermissionEntry call wake the
+      // waiter via wakeDelay() — wakeDelay clears the timer and
+      // resolves the await so the handler doesn't leak. Undefined
+      // once the delay window has ended (one way or the other).
+      displayTimer: NodeJS.Timeout | undefined;
+      // Resolver for the delay-window await. Set when
+      // handlePermissionRequest starts the timer; called by
+      // wakeDelay() either from the timer callback (display the
+      // prompt) or from resolvePermissionEntry (sibling resolved
+      // first, suppress the prompt). Undefined after wake.
+      wakeDelay: (() => void) | undefined;
+      // True once the resolver has been torn down via
+      // resolvePermissionEntry. handlePermissionRequest checks this
+      // after the delay-await returns and skips posting if a sibling
+      // resolved during the delay window.
+      resolved: boolean;
     }
   >();
   // When backfillHistory is true, we surface every replayed event. When
@@ -484,10 +499,10 @@ export class SessionBridge {
     if (session.threadTs) {
       threadRegistry.promote(this, session.channel, session.threadTs);
     }
-    // Mark live activity for the transcript-on-exit upload. Without
+    // Mark live activity for the bundle-on-exit upload. Without
     // this, eager-attached sessions (no live notifications this run)
     // would still get re-archived on bridge close, spamming threads
-    // with redundant transcripts of conversations that didn't change.
+    // with redundant bundles of conversations that didn't change.
     session.hadActivity = true;
 
     switch (kind) {
@@ -703,11 +718,40 @@ export class SessionBridge {
       options,
       promptTs: undefined,
       promptChannel: undefined,
+      displayTimer: undefined,
+      wakeDelay: undefined,
+      resolved: false,
     };
     this.permissionResolvers.set(key, entry);
     log.info(
       `permission requested session=${sessionId.slice(0, 8)} requestId=${typeof r.id}:${key}`,
     );
+
+    const delayMs = this.opts.config.permissionDisplayDelayMs;
+    if (delayMs > 0) {
+      // Defer the actual post so a fast auto-approve resolution can
+      // suppress it entirely (no transient :lock: message flashing in
+      // the Slack thread).
+      await new Promise<void>((resolveTimer) => {
+        entry.wakeDelay = () => {
+          if (entry.displayTimer) {
+            clearTimeout(entry.displayTimer);
+            entry.displayTimer = undefined;
+          }
+          entry.wakeDelay = undefined;
+          resolveTimer();
+        };
+        entry.displayTimer = setTimeout(() => {
+          entry.wakeDelay?.();
+        }, delayMs);
+      });
+      if (entry.resolved) {
+        log.info(
+          `permission suppressed-by-delay requestId=${typeof r.id}:${key} session=${sessionId.slice(0, 8)} delayMs=${delayMs}`,
+        );
+        return;
+      }
+    }
 
     const session = await this.ensureSession(sessionId, params);
     if (!session) {
@@ -768,6 +812,13 @@ export class SessionBridge {
     entry: NonNullable<ReturnType<typeof this.permissionResolvers.get>>,
   ): Promise<void> {
     this.permissionResolvers.delete(String(entry.requestId));
+    entry.resolved = true;
+    if (entry.wakeDelay) {
+      // Resolution arrived during the display-delay window. Wake the
+      // awaiter so handlePermissionRequest can see entry.resolved and
+      // return without posting; the wake fn also clears the timer.
+      entry.wakeDelay();
+    }
     if (entry.promptTs && entry.promptChannel) {
       await this.opts.thread.deleteMessage(
         entry.promptChannel,
@@ -974,15 +1025,13 @@ export class SessionBridge {
     }
   }
 
-  // Build a markdown transcript of every thread we own and upload each
-  // to its respective thread as a file attachment. Called from the
-  // entry point's bridge-close path before cleanup, gated on
-  // config.uploadTranscriptOnEnd. Source of truth is hydra's REST
-  // history endpoint — the daemon owns the canonical broadcast log
-  // and gives us structured events (prompts, agent text, tool calls,
-  // plans) rather than the Slack-rendered text we used to scrape.
-  async uploadTranscriptsOnExit(): Promise<void> {
-    if (!this.opts.config.uploadTranscriptOnEnd) {
+  // Upload the daemon-built *.hydra bundle for every thread we own as
+  // a file attachment. Called from the entry point's bridge-close path
+  // before cleanup, gated on config.uploadBundleOnEnd. Recipients can
+  // re-import the bundle into any hydra (via `hydra-acp sessions import`
+  // or the browser's Import button) to continue the conversation.
+  async uploadBundlesOnExit(): Promise<void> {
+    if (!this.opts.config.uploadBundleOnEnd) {
       return;
     }
     for (const session of this.sessions.values()) {
@@ -990,45 +1039,33 @@ export class SessionBridge {
         continue;
       }
       // Skip sessions we eager-attached for routing but never saw a
-      // notification for this run. Re-archiving an unchanged old
-      // thread on every daemon stop would spam Slack with duplicate
-      // transcripts.
+      // notification for this run. Re-uploading an unchanged old thread
+      // on every daemon stop would spam Slack with duplicate bundles.
       if (!session.hadActivity) {
         continue;
       }
       try {
-        const entries = await fetchHydraHistory({
+        const bundleText = await fetchHydraBundleText({
           daemonUrl: this.opts.config.hydraDaemonUrl,
           token: this.opts.config.hydraToken,
           sessionId: session.sessionId,
-        });
-        if (entries.length === 0) {
-          continue;
-        }
-        const md = renderHydraHistoryAsMarkdown({
-          sessionId: session.sessionId,
-          title: session.title,
-          cwd: session.cwd,
-          currentModel: session.modelId,
-          currentMode: session.modeId,
-          entries,
         });
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         await this.opts.thread.uploadFile({
           channel: session.channel,
           threadTs: session.threadTs,
-          filename: `transcript-${session.sessionId.slice(0, 8)}-${stamp}.md`,
+          filename: `hydra-${session.sessionId.slice(0, 8)}-${stamp}.hydra`,
           title: session.title
-            ? `Transcript: ${session.title}`
-            : `Transcript: ${session.sessionId.slice(0, 8)}`,
-          content: md,
+            ? `Bundle: ${session.title}`
+            : `Bundle: ${session.sessionId.slice(0, 8)}`,
+          content: bundleText,
         });
         log.info(
-          `transcript uploaded for ${session.sessionId.slice(0, 8)} (${entries.length} entries)`,
+          `bundle uploaded for ${session.sessionId.slice(0, 8)} (${bundleText.length} bytes)`,
         );
       } catch (err) {
         log.warn(
-          `transcript upload failed for ${session.sessionId.slice(0, 8)}: ${(err as Error).message}`,
+          `bundle upload failed for ${session.sessionId.slice(0, 8)}: ${(err as Error).message}`,
         );
       }
     }

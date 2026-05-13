@@ -89,14 +89,14 @@ async function main(): Promise<void> {
         initialMessages,
       });
       attach.on("close", () => {
-        // Run the transcript dump (if enabled) before tearing down so
+        // Run the bundle dump (if enabled) before tearing down so
         // session state — channel, threadTs, sessionId — is still
         // populated for the upload. cleanup() and unregister run in
         // the .finally so they always happen even if upload errors.
         void bridge
-          .uploadTranscriptsOnExit()
+          .uploadBundlesOnExit()
           .catch((err: unknown) => {
-            log.warn(`transcript upload error: ${(err as Error).message}`);
+            log.warn(`bundle upload error: ${(err as Error).message}`);
           })
           .finally(() => {
             bridge.cleanup();

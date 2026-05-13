@@ -129,7 +129,7 @@ export class ThreadClient {
   }
 
   // Upload arbitrary text content as a file in a thread. Used for the
-  // session-end transcript dump.
+  // session-end bundle dump.
   async uploadFile(opts: {
     channel: string;
     threadTs: string | undefined;

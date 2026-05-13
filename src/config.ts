@@ -7,7 +7,11 @@ export interface Config {
   slackAppToken: string;
   slackChannelId: string | undefined;
   authorizedUsers: Set<string>;
-  uploadTranscriptOnEnd: boolean;
+  // When true, attach the session's *.hydra bundle (meta + history;
+  // produced by GET /v1/sessions/:id/export) to the Slack thread when
+  // the session closes. Bundles can be re-imported into any hydra
+  // daemon to reconstitute the conversation context.
+  uploadBundleOnEnd: boolean;
   websocketStaleThreshold: number;
   imageUploadRateLimit: number;
   imageUploadRateWindow: number;
@@ -28,6 +32,12 @@ export interface Config {
   // Quiet period (ms) of inbound silence before we consider the attach
   // "caught up to live." Used only when backfillHistory is false.
   liveQuietMs: number;
+  // Delay (ms) between receiving a session/request_permission and posting
+  // the Slack prompt. If session/permission_resolved (or the tool-call
+  // fallback) fires within this window — e.g. the auto-approver answers
+  // — no Slack message is ever posted, avoiding a transient :lock: that
+  // gets deleted moments later. 0 disables.
+  permissionDisplayDelayMs: number;
   debug: boolean;
 }
 
@@ -160,7 +170,7 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
     slackAppToken,
     slackChannelId: map.get("SLACK_CHANNEL_ID") ?? undefined,
     authorizedUsers: stringSet(map, "AUTHORIZED_USERS"),
-    uploadTranscriptOnEnd: bool(map, "UPLOAD_TRANSCRIPT_ON_END", true),
+    uploadBundleOnEnd: bool(map, "UPLOAD_BUNDLE_ON_END", true),
     websocketStaleThreshold: intVal(map, "WEBSOCKET_STALE_THRESHOLD", 30),
     imageUploadRateLimit: intVal(map, "IMAGE_UPLOAD_RATE_LIMIT", 30),
     imageUploadRateWindow: intVal(map, "IMAGE_UPLOAD_RATE_WINDOW", 60),
@@ -170,6 +180,7 @@ export function loadConfig(path: string = DEFAULT_CONF_PATH): Config {
     hydraPollIntervalMs: intVal(map, "HYDRA_POLL_INTERVAL_MS", 2000),
     backfillHistory: bool(map, "BACKFILL_HISTORY", false),
     liveQuietMs: intVal(map, "LIVE_QUIET_MS", 2000),
+    permissionDisplayDelayMs: intVal(map, "PERMISSION_DELAY_MS", 500),
     debug: bool(map, "DEBUG", false),
   };
 }
