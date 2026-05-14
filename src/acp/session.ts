@@ -2244,36 +2244,34 @@ function renderParent(opts: {
   if (heading) {
     lines.push(`:robot_face: *${heading}*`);
   }
+  const tailParts: string[] = [];
   if (opts.cwd) {
-    lines.push(`_${opts.cwd}_ on \`${daemonHost}\``);
+    tailParts.push(`_${opts.cwd}_ on \`${daemonHost}\``);
   } else {
-    lines.push(`on \`${daemonHost}\``);
+    tailParts.push(`on \`${daemonHost}\``);
   }
-  const metaParts: string[] = [];
   const agent = friendlyAgent(opts.agentName);
   // Collapse "agent · model" into "agent(model)" so the line reads like
   // "opencode(gpt-5-codex) · mode build · …" rather than three separate
   // backticked pills competing for the same row.
   const agentCell = agentWithModel(agent, opts.modelId);
   if (agentCell) {
-    metaParts.push(`\`${agentCell}\``);
+    tailParts.push(`\`${agentCell}\``);
   }
   if (opts.modeId) {
-    metaParts.push(`mode \`${opts.modeId}\``);
+    tailParts.push(`mode \`${opts.modeId}\``);
   }
   if (typeof opts.contextUsed === "number" || typeof opts.contextSize === "number") {
     const used = formatTokens(opts.contextUsed);
     const size = formatTokens(opts.contextSize);
-    metaParts.push(`\`${used}\`/\`${size}\``);
+    tailParts.push(`\`${used}\`/\`${size}\``);
   }
   if (typeof opts.costAmount === "number") {
     const cur = opts.costCurrency ?? "USD";
-    metaParts.push(`\`${formatCost(opts.costAmount, cur)}\``);
+    tailParts.push(`\`${formatCost(opts.costAmount, cur)}\``);
   }
-  if (metaParts.length > 0) {
-    lines.push(metaParts.join(" · "));
-  }
-  lines.push(sessionMarker(opts.sessionId));
+  tailParts.push(sessionMarker(opts.sessionId));
+  lines.push(tailParts.join(" "));
   return lines.join("\n");
 }
 
