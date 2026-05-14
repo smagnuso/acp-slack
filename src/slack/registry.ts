@@ -19,6 +19,10 @@ export interface ThreadEntry {
 
 class ThreadRegistry {
   private byThread = new Map<string, ThreadEntry[]>(); // key: channel|threadTs
+  private sessionSubscribers = new Map<
+    string,
+    ((entry: ThreadEntry) => void)[]
+  >();
 
   register(entry: ThreadEntry): void {
     const k = this.key(entry.channel, entry.threadTs);
@@ -28,6 +32,49 @@ class ThreadRegistry {
     }
     list.push(entry);
     this.byThread.set(k, list);
+    const subs = this.sessionSubscribers.get(entry.sessionId);
+    if (subs && subs.length > 0) {
+      this.sessionSubscribers.delete(entry.sessionId);
+      for (const cb of subs) {
+        try {
+          cb(entry);
+        } catch {
+          // Subscriber failure must not break registration.
+        }
+      }
+    }
+  }
+
+  // Fire `cb` once when a thread is registered for `sessionId`. If the
+  // session is already registered, fires on a microtask so callers can
+  // always treat it as async. Returns an unsubscribe fn.
+  onceForSession(
+    sessionId: string,
+    cb: (entry: ThreadEntry) => void,
+  ): () => void {
+    for (const list of this.byThread.values()) {
+      const found = list.find((e) => e.sessionId === sessionId);
+      if (found) {
+        queueMicrotask(() => cb(found));
+        return () => {};
+      }
+    }
+    const arr = this.sessionSubscribers.get(sessionId) ?? [];
+    arr.push(cb);
+    this.sessionSubscribers.set(sessionId, arr);
+    return () => {
+      const cur = this.sessionSubscribers.get(sessionId);
+      if (!cur) {
+        return;
+      }
+      const idx = cur.indexOf(cb);
+      if (idx >= 0) {
+        cur.splice(idx, 1);
+      }
+      if (cur.length === 0) {
+        this.sessionSubscribers.delete(sessionId);
+      }
+    };
   }
 
   unregisterBridge(bridge: SessionBridge): void {

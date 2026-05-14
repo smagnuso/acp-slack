@@ -481,14 +481,56 @@ async function handleSessionCommand(
   await app.client.reactions
     .add({ channel, timestamp: ts, name: "white_check_mark" })
     .catch(() => undefined);
-  await app.client.chat.postMessage({
+  const head = `:rocket: starting \`${result.agentId}\` in \`${result.cwd}\` (session \`${result.sessionId}\`)`;
+  const queuedSuffix = args.prompt ? "; first prompt queued" : "";
+  const initial = `${head}; thread will appear once the agent is ready${queuedSuffix}`;
+  const posted = await app.client.chat.postMessage({
     channel,
     thread_ts: ts,
-    text:
-      `:rocket: starting \`${result.agentId}\` in \`${result.cwd}\` ` +
-      `(session \`${result.sessionId}\`); thread will appear once the agent is ready` +
-      (args.prompt ? "; first prompt queued" : ""),
+    text: initial,
   });
+  const startingTs = posted.ts;
+  if (!startingTs) {
+    return;
+  }
+  // Cap the wait so a failed/abandoned session doesn't leak a subscriber
+  // entry forever. The starting message simply stays as-is on timeout.
+  const timeout = setTimeout(() => {
+    unsubscribe();
+  }, 5 * 60 * 1000);
+  const unsubscribe = threadRegistry.onceForSession(
+    result.sessionId,
+    (entry) => {
+      clearTimeout(timeout);
+      void (async () => {
+        let linkText = "thread ready";
+        try {
+          const link = await app.client.chat.getPermalink({
+            channel: entry.channel,
+            message_ts: entry.threadTs,
+          });
+          if (link.permalink) {
+            linkText = `<${link.permalink}|open thread>`;
+          }
+        } catch (err) {
+          log.warn(
+            `chat.getPermalink failed for ${entry.sessionId}: ${(err as Error).message}`,
+          );
+        }
+        try {
+          await app.client.chat.update({
+            channel,
+            ts: startingTs,
+            text: `${head} → ${linkText}${queuedSuffix}`,
+          });
+        } catch (err) {
+          log.warn(
+            `chat.update of starting msg failed for ${entry.sessionId}: ${(err as Error).message}`,
+          );
+        }
+      })();
+    },
+  );
 }
 
 async function handleAgents(
