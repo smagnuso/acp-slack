@@ -481,13 +481,12 @@ async function handleSessionCommand(
   await app.client.reactions
     .add({ channel, timestamp: ts, name: "white_check_mark" })
     .catch(() => undefined);
-  const shortId = result.sessionId.slice(0, 8);
   await app.client.chat.postMessage({
     channel,
     thread_ts: ts,
     text:
       `:rocket: starting \`${result.agentId}\` in \`${result.cwd}\` ` +
-      `(session \`${shortId}\`); thread will appear once the agent is ready` +
+      `(session \`${result.sessionId}\`); thread will appear once the agent is ready` +
       (args.prompt ? "; first prompt queued" : ""),
   });
 }
