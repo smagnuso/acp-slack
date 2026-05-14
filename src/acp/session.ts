@@ -21,6 +21,46 @@ import type { JsonRpcNotification, JsonRpcRequest } from "./protocol.js";
 
 const log = logger("session");
 
+// Cap each streamed agent Slack message at this many rendered chars.
+// Slack's documented chat.postMessage text limit is 40k, but the server
+// renders text into rich_text blocks and a single rich_text_section text
+// element is capped at ~4000 chars — long agent responses would fail
+// chat.update with msg_too_long once they crossed that line. We split at
+// a comfortable margin below it and roll over into continuation messages
+// in the same thread.
+const SLACK_MESSAGE_LIMIT = 3500;
+
+// Pick a split offset within `text` no greater than `limit`. Prefers the
+// last paragraph break (\n\n), then the last newline, then a sentence
+// boundary, then the hard cap. The aim is to break between paragraphs or
+// list items where possible, so each Slack message reads naturally on
+// its own and broken formatting (half-open code fences, dangling list
+// markers) is rare. A `limit/2` floor on the resulting head length keeps
+// us from producing absurdly tiny messages when only an early break is
+// available.
+export function findSplitPoint(text: string, limit: number): number {
+  const window = text.slice(0, limit);
+  const floor = limit / 2;
+
+  const paraIdx = window.lastIndexOf("\n\n");
+  if (paraIdx !== -1 && paraIdx + 2 >= floor) {
+    return paraIdx + 2;
+  }
+  const nlIdx = window.lastIndexOf("\n");
+  if (nlIdx !== -1 && nlIdx + 1 >= floor) {
+    return nlIdx + 1;
+  }
+  const sentIdx = Math.max(
+    window.lastIndexOf(". "),
+    window.lastIndexOf("! "),
+    window.lastIndexOf("? "),
+  );
+  if (sentIdx !== -1 && sentIdx + 2 >= floor) {
+    return sentIdx + 2;
+  }
+  return limit;
+}
+
 interface QueuedPromptEntry {
   text: string;
   promptTs: string | undefined;
@@ -55,6 +95,11 @@ interface SessionState {
   // Last text written to Slack for the currently-open agent message; used
   // to skip no-op updates when a flush fires with no new chunks.
   agentLastSent: string | undefined;
+  // Offset into the rendered text (toSlackMrkdwn(agentChunks.join(""))) at
+  // which the currently-open Slack message begins. Advances when a flush
+  // rolls over into a continuation message after hitting Slack's
+  // per-message size limit; reset to 0 in closeAgentMessage.
+  agentRenderedBase: number;
   // Per-session flush serializer. Concurrent calls (periodic timer +
   // turn_complete arm + user_message_chunk arm + own-turn end after
   // session/prompt) would otherwise race on agentMessageTs — both seeing
@@ -1222,6 +1267,7 @@ export class SessionBridge {
       agentChunks: [],
       agentMessageTs: undefined,
       agentLastSent: undefined,
+      agentRenderedBase: 0,
       agentFlushChain: undefined,
       promptChain: undefined,
       queuedPromptCount: 0,
@@ -1353,15 +1399,48 @@ export class SessionBridge {
         `flushAgentMessage with no threadTs for ${session.sessionId}; dropping`,
       );
       session.agentChunks = [];
+      session.agentRenderedBase = 0;
       return;
     }
-    const text = toSlackMrkdwn(session.agentChunks.join(""));
-    if (!text.trim()) {
-      return;
+    const fullText = toSlackMrkdwn(session.agentChunks.join(""));
+
+    // Walk forward through fullText one Slack message at a time. Each
+    // iteration handles the slice that belongs to the currently-open
+    // (or about-to-be-opened) Slack message; once that slice fits
+    // within SLACK_MESSAGE_LIMIT, the loop is done. If it doesn't,
+    // finalize the current message at a safe split point, advance
+    // agentRenderedBase, and let the next iteration post the remainder
+    // as a fresh continuation message.
+    while (true) {
+      const current = fullText.slice(session.agentRenderedBase);
+      if (!current.trim()) {
+        return;
+      }
+
+      if (current.length <= SLACK_MESSAGE_LIMIT) {
+        if (current === session.agentLastSent) {
+          return;
+        }
+        await this.postOrUpdate(session, current);
+        session.agentLastSent = current;
+        return;
+      }
+
+      // Overflow: split current at a safe boundary, finalize the head
+      // in this Slack message, and roll over to a new one for the tail.
+      const splitAt = findSplitPoint(current, SLACK_MESSAGE_LIMIT);
+      const head = current.slice(0, splitAt);
+      await this.postOrUpdate(session, head);
+      session.agentRenderedBase += splitAt;
+      session.agentMessageTs = undefined;
+      session.agentLastSent = undefined;
     }
-    if (text === session.agentLastSent) {
-      return;
-    }
+  }
+
+  private async postOrUpdate(
+    session: SessionState,
+    text: string,
+  ): Promise<void> {
     if (session.agentMessageTs) {
       log.info(
         `flush update ${session.sessionId.slice(0, 8)} ts=${session.agentMessageTs} ${text.length}ch`,
@@ -1371,18 +1450,17 @@ export class SessionBridge {
         session.agentMessageTs,
         text,
       );
-    } else {
-      log.info(
-        `flush post ${session.sessionId.slice(0, 8)} ${text.length}ch`,
-      );
-      const r = await this.opts.thread.postMessage({
-        channel: session.channel,
-        threadTs: session.threadTs,
-        text,
-      });
-      session.agentMessageTs = r.ts;
+      return;
     }
-    session.agentLastSent = text;
+    log.info(
+      `flush post ${session.sessionId.slice(0, 8)} ${text.length}ch`,
+    );
+    const r = await this.opts.thread.postMessage({
+      channel: session.channel,
+      threadTs: session.threadTs,
+      text,
+    });
+    session.agentMessageTs = r.ts;
   }
 
   // Finalize the current agent Slack message; the next agent stream will
@@ -1392,6 +1470,7 @@ export class SessionBridge {
     session.agentChunks = [];
     session.agentMessageTs = undefined;
     session.agentLastSent = undefined;
+    session.agentRenderedBase = 0;
   }
 
   // Flush accumulated user-message chunks (input from another frontend
