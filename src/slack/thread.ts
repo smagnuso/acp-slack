@@ -1,4 +1,5 @@
 import type { App } from "@slack/bolt";
+import type { SlackBlock } from "../formatters/markdown.js";
 import { logger } from "../util/log.js";
 
 const log = logger("slack-thread");
@@ -7,6 +8,9 @@ export interface PostOpts {
   channel: string;
   threadTs?: string;
   text: string;
+  // Optional Block Kit payload. When set, Slack uses it for display and
+  // `text` is kept for notifications / search / accessibility fallback.
+  blocks?: SlackBlock[];
   // If set, opens a thread when not provided.
   unfurl?: boolean;
 }
@@ -24,6 +28,7 @@ export class ThreadClient {
     const res = await this.app.client.chat.postMessage({
       channel: opts.channel,
       text: opts.text,
+      ...(opts.blocks ? { blocks: opts.blocks as unknown as never } : {}),
       ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}),
       unfurl_links: opts.unfurl ?? false,
       unfurl_media: opts.unfurl ?? false,
@@ -38,9 +43,24 @@ export class ThreadClient {
     };
   }
 
-  async updateMessage(channel: string, ts: string, text: string): Promise<void> {
+  // When `blocks` is undefined, chat.update is called WITHOUT a blocks
+  // field so a previous blocks-mode update can be rolled back to plain
+  // text. Passing `blocks: []` would not do that — Slack ignores empty
+  // arrays. The current set of blocks (if any) on the existing message
+  // is replaced wholesale.
+  async updateMessage(
+    channel: string,
+    ts: string,
+    text: string,
+    blocks?: SlackBlock[],
+  ): Promise<void> {
     try {
-      const res = await this.app.client.chat.update({ channel, ts, text });
+      const res = await this.app.client.chat.update({
+        channel,
+        ts,
+        text,
+        ...(blocks ? { blocks: blocks as unknown as never } : { blocks: [] }),
+      });
       if (!res.ok) {
         log.warn(`chat.update !ok: ${JSON.stringify(res)}`);
       }

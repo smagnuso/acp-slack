@@ -1,7 +1,12 @@
 import { hostname } from "node:os";
 import { basename } from "node:path";
 import type { Config } from "../config.js";
-import { toSlackMrkdwn } from "../formatters/markdown.js";
+import {
+  buildHighlightBlocks,
+  fitsBlockLimits,
+  toSlackMrkdwn,
+  type SlackBlock,
+} from "../formatters/markdown.js";
 import {
   type ToolCallStatus,
   renderToolCallHeader,
@@ -1402,7 +1407,30 @@ export class SessionBridge {
       session.agentRenderedBase = 0;
       return;
     }
-    const fullText = toSlackMrkdwn(session.agentChunks.join(""));
+    const rawText = session.agentChunks.join("");
+
+    // Blocks-mode path: when this message has a language-hinted fence
+    // (```cpp, ```diff, …) we send it as Block Kit so Slack renders the
+    // code with syntax highlighting. Only used while we're still on the
+    // initial Slack message — once we've rolled over a continuation, we
+    // stay in text mode (blocks-mode doesn't split). If the blocks
+    // wouldn't fit within Slack's per-block limits, fall through too.
+    if (session.agentRenderedBase === 0) {
+      const blocks = buildHighlightBlocks(rawText);
+      if (blocks && fitsBlockLimits(blocks)) {
+        const fallback = toSlackMrkdwn(rawText);
+        if (fallback.length <= SLACK_MESSAGE_LIMIT) {
+          if (fallback === session.agentLastSent) {
+            return;
+          }
+          await this.postOrUpdate(session, fallback, blocks);
+          session.agentLastSent = fallback;
+          return;
+        }
+      }
+    }
+
+    const fullText = toSlackMrkdwn(rawText);
 
     // Walk forward through fullText one Slack message at a time. Each
     // iteration handles the slice that belongs to the currently-open
@@ -1440,25 +1468,28 @@ export class SessionBridge {
   private async postOrUpdate(
     session: SessionState,
     text: string,
+    blocks?: SlackBlock[],
   ): Promise<void> {
     if (session.agentMessageTs) {
       log.info(
-        `flush update ${session.sessionId.slice(0, 8)} ts=${session.agentMessageTs} ${text.length}ch`,
+        `flush update ${session.sessionId.slice(0, 8)} ts=${session.agentMessageTs} ${text.length}ch${blocks ? ` blocks=${blocks.length}` : ""}`,
       );
       await this.opts.thread.updateMessage(
         session.channel,
         session.agentMessageTs,
         text,
+        blocks,
       );
       return;
     }
     log.info(
-      `flush post ${session.sessionId.slice(0, 8)} ${text.length}ch`,
+      `flush post ${session.sessionId.slice(0, 8)} ${text.length}ch${blocks ? ` blocks=${blocks.length}` : ""}`,
     );
     const r = await this.opts.thread.postMessage({
       channel: session.channel,
       threadTs: session.threadTs,
       text,
+      ...(blocks ? { blocks } : {}),
     });
     session.agentMessageTs = r.ts;
   }

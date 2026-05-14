@@ -1,6 +1,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { toSlackMrkdwn } from "../src/formatters/markdown.js";
+import {
+  buildHighlightBlocks,
+  fitsBlockLimits,
+  toSlackMrkdwn,
+} from "../src/formatters/markdown.js";
 
 test("converts **bold** and __bold__ to *bold*", () => {
   assert.equal(toSlackMrkdwn("**hi** there"), "*hi* there");
@@ -49,4 +53,84 @@ test("does not touch ascii-art tables already inside a fence", () => {
   const out = toSlackMrkdwn(src);
   // No double opening fence on its own line.
   assert.equal(out.match(/^```$/gm)?.length, 2);
+});
+
+test("buildHighlightBlocks returns null when no trigger feature present", () => {
+  assert.equal(buildHighlightBlocks("just prose"), null);
+  // Unlabeled fence alone — mrkdwn already renders monospace correctly.
+  assert.equal(buildHighlightBlocks("prose\n```\nplain code\n```\n"), null);
+});
+
+test("buildHighlightBlocks emits a single markdown block when a language-hinted fence is present", () => {
+  const src = "Here is some code:\n```cpp\nint main() { return 0; }\n```\nAnd more prose.";
+  const blocks = buildHighlightBlocks(src);
+  assert.ok(blocks);
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0]?.type, "markdown");
+  // Raw text passes through — fence with language hint intact so Slack
+  // can syntax-highlight it inside the markdown block.
+  assert.match((blocks[0] as { text: string }).text, /```cpp\nint main/);
+});
+
+test("buildHighlightBlocks keeps prose unmodified (standard markdown, not mrkdwn)", () => {
+  const src = "**bold** and [link](https://e.com)\n```diff\n-a\n+b\n```\n";
+  const blocks = buildHighlightBlocks(src);
+  assert.ok(blocks);
+  const md = blocks[0] as { text: string };
+  assert.match(md.text, /\*\*bold\*\*/);
+  assert.match(md.text, /\[link\]\(https:\/\/e\.com\)/);
+});
+
+test("buildHighlightBlocks triggers on a GFM table with no fences", () => {
+  const src = [
+    "Some prose",
+    "",
+    "| h1 | h2 |",
+    "| -- | -- |",
+    "| a  | b  |",
+    "",
+    "trailing.",
+  ].join("\n");
+  const blocks = buildHighlightBlocks(src);
+  assert.ok(blocks);
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0]?.type, "markdown");
+  assert.match((blocks[0] as { text: string }).text, /\| h1 \| h2 \|/);
+  assert.match((blocks[0] as { text: string }).text, /\| -- \| -- \|/);
+});
+
+test("buildHighlightBlocks wraps ASCII-art tables in unlabeled fences before sending", () => {
+  const src = [
+    "Top:",
+    "",
+    "  #   File   Status",
+    "  ─   ────   ──────",
+    "  1   a.c    ok",
+    "",
+    "GFM:",
+    "",
+    "| col | val |",
+    "| --- | --- |",
+    "| 1   | x   |",
+  ].join("\n");
+  const blocks = buildHighlightBlocks(src);
+  assert.ok(blocks);
+  assert.equal(blocks.length, 1);
+  const text = (blocks[0] as { text: string }).text;
+  // ASCII table got wrapped in an unlabeled fence so its alignment
+  // survives the markdown block's variable-width rendering.
+  assert.match(text, /```\n  #   File   Status/);
+  // GFM table stays as raw markdown table syntax.
+  assert.match(text, /\| col \| val \|/);
+});
+
+test("fitsBlockLimits rejects oversize markdown payloads", () => {
+  const small = buildHighlightBlocks("a\n```py\nprint(1)\n```\n");
+  assert.ok(small);
+  assert.equal(fitsBlockLimits(small), true);
+
+  const oversize: { type: "markdown"; text: string }[] = [
+    { type: "markdown", text: "x".repeat(12001) },
+  ];
+  assert.equal(fitsBlockLimits(oversize), false);
 });

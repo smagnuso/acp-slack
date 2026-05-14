@@ -44,6 +44,36 @@ export function convertMarkdownTables(text: string): string {
   return out.join("\n");
 }
 
+// True iff `text` contains at least one GFM table outside fenced code.
+// Mirrors the detection logic in convertMarkdownTables but doesn't
+// transform anything — used as a trigger for the blocks-mode path,
+// which leaves GFM tables intact so the `markdown` block can render
+// them as actual columns rather than monospace text.
+export function hasGfmTable(text: string): boolean {
+  if (!text.includes("|")) {
+    return false;
+  }
+  const lines = text.split("\n");
+  let inFence = false;
+  for (let i = 0; i + 1 < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (FENCE_LINE.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) {
+      continue;
+    }
+    if (
+      TABLE_LINE.test(line) &&
+      SEPARATOR_LINE.test(lines[i + 1] ?? "")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function parseRow(line: string): string[] {
   let inner = line.trim();
   if (inner.startsWith("|")) {

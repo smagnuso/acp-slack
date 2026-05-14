@@ -1,4 +1,4 @@
-import { convertMarkdownTables } from "./tables.js";
+import { convertMarkdownTables, hasGfmTable } from "./tables.js";
 
 // Best-effort markdown → Slack mrkdwn. Slack's flavor:
 //   *bold*, _italic_, ~strike~, `code`, ```fence```, > quote, * bullets.
@@ -11,6 +11,53 @@ export function toSlackMrkdwn(text: string): string {
   const withGfmTables = convertMarkdownTables(text);
   const withAsciiTables = transformOutsideFences(withGfmTables, wrapAsciiTables);
   return transformOutsideFences(withAsciiTables, transform);
+}
+
+// Slack `markdown` block. See:
+//   https://docs.slack.dev/reference/block-kit/blocks/markdown-block/
+// Renders standard markdown — including ```lang fenced code blocks
+// (syntax-highlighted by Slack since March 2026), GFM tables, **bold**,
+// [text](url), headings, etc. We send the whole message as one markdown
+// block when any of those features would otherwise be lost by the
+// mrkdwn / text-field path.
+export interface MarkdownBlock {
+  type: "markdown";
+  text: string;
+}
+export type SlackBlock = MarkdownBlock;
+
+const FENCE_INFO_RE = /```([^\s`]+)[ \t]*\n/;
+
+// Build a single Slack `markdown` block from raw agent text when the
+// message has a feature the mrkdwn path can't render:
+//   - language-hinted fenced code (```cpp, ```diff, …) → syntax
+//     highlighting in the markdown block.
+//   - GFM tables (`| h | h |` + `| - | - |`) → native column rendering.
+// ASCII-art tables (─ bars) are wrapped in unlabeled fences first so
+// they stay monospace inside the markdown block.
+//
+// Returns null when no trigger fires — caller stays on the text /
+// mrkdwn path.
+export function buildHighlightBlocks(raw: string): SlackBlock[] | null {
+  const pre = transformOutsideFences(raw, wrapAsciiTables);
+  if (!FENCE_INFO_RE.test(pre) && !hasGfmTable(pre)) {
+    return null;
+  }
+  return [{ type: "markdown", text: pre }];
+}
+
+// `markdown` blocks share a cumulative 12000-char budget per payload.
+// Returns false when the block array would exceed it — caller should
+// fall back to the text-field / mrkdwn split path.
+export function fitsBlockLimits(blocks: SlackBlock[]): boolean {
+  let total = 0;
+  for (const b of blocks) {
+    total += b.text.length;
+    if (total > 12000) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function transform(s: string): string {
