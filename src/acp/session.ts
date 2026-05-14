@@ -272,11 +272,11 @@ export class SessionBridge {
     Map<string, string | undefined>
   >();
   // String(requestId) -> resolver for any in-flight permission request
-  // awaiting a Slack reaction. Keyed by requestId rather than sessionId
-  // because an agent can have multiple permission requests pending on
-  // the same session simultaneously (e.g. parallel tool invocations);
-  // keying by sessionId would overwrite earlier entries and leave the
-  // first prompts un-resolvable.
+  // awaiting a Slack reaction. Keyed by toolCallId (per RFD #533) — that's
+  // the wire-stable correlator the daemon broadcasts on permission_resolved
+  // events. An agent can have multiple permission requests pending on the
+  // same session simultaneously (parallel tool invocations); each carries
+  // its own toolCallId so collisions are not a concern.
   permissionResolvers = new Map<
     string,
     {
@@ -408,34 +408,29 @@ export class SessionBridge {
     // A sibling frontend answered a permission request before us. Tear
     // down our (now-stale) Slack prompt. Lives outside the live-gate
     // because it's a transient signal, not session activity. Idempotent:
-    // if we don't have an entry for the requestId, no-op.
-    if (n.method === "session/permission_resolved") {
-      const requestId = params.requestId as string | number | undefined;
-      if (requestId === undefined) {
+    // if we don't have an entry for the toolCallId, no-op.
+    if (n.method === "session/update") {
+      const update = (params.update ?? {}) as Record<string, unknown>;
+      if (update.sessionUpdate === "permission_resolved") {
+        const toolCallId =
+          typeof update.toolCallId === "string" ? update.toolCallId : undefined;
+        if (!toolCallId) {
+          return;
+        }
+        const entry = this.permissionResolvers.get(toolCallId);
+        if (entry) {
+          log.info(
+            `permission_resolved match toolCallId=${toolCallId} session=${entry.sessionId.slice(0, 8)} promptTs=${entry.promptTs ?? "(none)"}`,
+          );
+          await this.resolvePermissionEntry(entry).catch(() => undefined);
+        } else {
+          const known = Array.from(this.permissionResolvers.keys());
+          log.info(
+            `permission_resolved miss toolCallId=${toolCallId} known=[${known.join(",")}]`,
+          );
+        }
         return;
       }
-      // Compare via String() because hydra forwards requestId as a JSON
-      // string while our entry.requestId is the parsed JSON-RPC id —
-      // typically a number. `42 === "42"` is false; coerce both sides.
-      const want = String(requestId);
-      let matched = false;
-      const entry = this.permissionResolvers.get(want);
-      if (entry) {
-        matched = true;
-        log.info(
-          `permission_resolved match requestId=${want} session=${entry.sessionId.slice(0, 8)} promptTs=${entry.promptTs ?? "(none)"}`,
-        );
-        await this.resolvePermissionEntry(entry).catch(() => undefined);
-      }
-      if (!matched) {
-        const known = Array.from(this.permissionResolvers.values()).map(
-          (e) => `${typeof e.requestId}:${String(e.requestId)}`,
-        );
-        log.info(
-          `permission_resolved miss requestId=${typeof requestId}:${want} known=[${known.join(",")}]`,
-        );
-      }
-      return;
     }
 
     // available_commands_update is the one session/update kind we want
@@ -755,12 +750,18 @@ export class SessionBridge {
     // know them.
     const toolCall = (params.toolCall ?? {}) as Record<string, unknown>;
     const toolCallId = (toolCall.toolCallId ?? "") as string;
+    if (!toolCallId) {
+      // No toolCallId means we can't correlate sibling-resolution; refuse
+      // rather than silently drop into an un-clearable state.
+      this.opts.attach.replyError(r.id, -32602, "missing toolCall.toolCallId");
+      return;
+    }
     const options = (params.options ?? []) as Array<{
       optionId: string;
       name: string;
       kind?: string;
     }>;
-    const key = String(r.id);
+    const key = toolCallId;
     const entry: NonNullable<ReturnType<typeof this.permissionResolvers.get>> = {
       requestId: r.id,
       sessionId,
@@ -774,7 +775,7 @@ export class SessionBridge {
     };
     this.permissionResolvers.set(key, entry);
     log.info(
-      `permission requested session=${sessionId.slice(0, 8)} requestId=${typeof r.id}:${key}`,
+      `permission requested session=${sessionId.slice(0, 8)} toolCallId=${key} requestId=${typeof r.id}:${String(r.id)}`,
     );
 
     const delayMs = this.opts.config.permissionDisplayDelayMs;
@@ -797,7 +798,7 @@ export class SessionBridge {
       });
       if (entry.resolved) {
         log.info(
-          `permission suppressed-by-delay requestId=${typeof r.id}:${key} session=${sessionId.slice(0, 8)} delayMs=${delayMs}`,
+          `permission suppressed-by-delay toolCallId=${key} session=${sessionId.slice(0, 8)} delayMs=${delayMs}`,
         );
         return;
       }
@@ -838,14 +839,14 @@ export class SessionBridge {
       // notifications can tear down the message later.
       entry.promptTs = promptTs;
       log.info(
-        `permission posted requestId=${typeof r.id}:${key} session=${sessionId.slice(0, 8)} promptTs=${promptTs ?? "(none)"} promptChannel=${session.channel}`,
+        `permission posted toolCallId=${key} session=${sessionId.slice(0, 8)} promptTs=${promptTs ?? "(none)"} promptChannel=${session.channel}`,
       );
     } else if (promptTs) {
       // Resolved while we were posting. The notification handler
       // couldn't delete because we hadn't told it the ts yet — clean
       // up the now-orphaned message ourselves.
       log.info(
-        `permission posted-but-already-resolved requestId=${typeof r.id}:${key}; deleting orphan ${session.channel}/${promptTs}`,
+        `permission posted-but-already-resolved toolCallId=${key}; deleting orphan ${session.channel}/${promptTs}`,
       );
       await this.opts.thread
         .deleteMessage(session.channel, promptTs)
@@ -855,13 +856,14 @@ export class SessionBridge {
 
   // Resolve a permission entry: clear from the resolver map and, if the
   // prompt was actually posted to Slack, delete it. Used both when a
-  // sibling frontend answered first (session/permission_resolved
-  // notification) and when this client itself answered (so we can drop
-  // the now-irrelevant prompt — the user already gave their reaction).
+  // sibling frontend answered first (session/update permission_resolved
+  // notification, RFD #533) and when this client itself answered (so we
+  // can drop the now-irrelevant prompt — the user already gave their
+  // reaction).
   private async resolvePermissionEntry(
     entry: NonNullable<ReturnType<typeof this.permissionResolvers.get>>,
   ): Promise<void> {
-    this.permissionResolvers.delete(String(entry.requestId));
+    this.permissionResolvers.delete(entry.toolCallId);
     entry.resolved = true;
     if (entry.wakeDelay) {
       // Resolution arrived during the display-delay window. Wake the
@@ -877,11 +879,11 @@ export class SessionBridge {
     }
   }
 
-  // Fallback for the case where session/permission_resolved didn't arrive
-  // (or arrived without a matching requestId): if the agent emits a
-  // tool_call_update for our pending permission's toolCallId in any
-  // non-pending state, the decision was clearly made elsewhere — clear
-  // our prompt the same way. resolvePermissionEntry is idempotent.
+  // Fallback for the case where session/update permission_resolved didn't
+  // arrive: if the agent emits a tool_call_update for our pending
+  // permission's toolCallId in any non-pending state, the decision was
+  // clearly made elsewhere — clear our prompt the same way.
+  // resolvePermissionEntry is idempotent.
   private async maybeResolvePermissionByToolCall(
     toolCallId: string,
     status: string | undefined,
@@ -889,15 +891,14 @@ export class SessionBridge {
     if (!toolCallId || !status || status === "pending") {
       return;
     }
-    for (const entry of this.permissionResolvers.values()) {
-      if (entry.toolCallId === toolCallId) {
-        log.info(
-          `permission resolved-by-tool-call toolCallId=${toolCallId} status=${status} requestId=${typeof entry.requestId}:${String(entry.requestId)}`,
-        );
-        await this.resolvePermissionEntry(entry).catch(() => undefined);
-        return;
-      }
+    const entry = this.permissionResolvers.get(toolCallId);
+    if (!entry) {
+      return;
     }
+    log.info(
+      `permission resolved-by-tool-call toolCallId=${toolCallId} status=${status}`,
+    );
+    await this.resolvePermissionEntry(entry).catch(() => undefined);
   }
 
   private async handleToolCallUpdate(
@@ -2012,7 +2013,7 @@ export class SessionBridge {
     if (!pending) {
       const open = Array.from(this.permissionResolvers.values()).map(
         (e) =>
-          `requestId=${String(e.requestId)} session=${e.sessionId.slice(0, 8)} promptTs=${e.promptTs ?? "(none)"} promptChannel=${e.promptChannel ?? "(none)"}`,
+          `toolCallId=${e.toolCallId} session=${e.sessionId.slice(0, 8)} promptTs=${e.promptTs ?? "(none)"} promptChannel=${e.promptChannel ?? "(none)"}`,
       );
       log.info(
         `permission ${action} miss: no resolver matches ${channel}/${ts}; open=[${open.join(" | ") || "(none)"}]`,
@@ -2020,7 +2021,7 @@ export class SessionBridge {
       return;
     }
     log.info(
-      `permission ${action} match: requestId=${String(pending.requestId)} session=${pending.sessionId.slice(0, 8)} ts=${ts}`,
+      `permission ${action} match: toolCallId=${pending.toolCallId} session=${pending.sessionId.slice(0, 8)} ts=${ts}`,
     );
     // Map the reaction to a kind ordering. The first option whose kind
     // matches in priority order wins; if nothing matches we fall back to

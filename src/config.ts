@@ -33,10 +33,10 @@ export interface Config {
   // "caught up to live." Used only when backfillHistory is false.
   liveQuietMs: number;
   // Delay (ms) between receiving a session/request_permission and posting
-  // the Slack prompt. If session/permission_resolved (or the tool-call
-  // fallback) fires within this window — e.g. the auto-approver answers
-  // — no Slack message is ever posted, avoiding a transient :lock: that
-  // gets deleted moments later. 0 disables.
+  // the Slack prompt. If session/update permission_resolved (RFD #533, or
+  // the tool-call fallback) fires within this window — e.g. the
+  // auto-approver answers — no Slack message is ever posted, avoiding a
+  // transient :lock: that gets deleted moments later. 0 disables.
   permissionDisplayDelayMs: number;
   debug: boolean;
 }
